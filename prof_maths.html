@@ -689,21 +689,37 @@
               corrPdfDoc.addImage(sc.toDataURL("image/png"),"PNG",m,m,iw,sliceH);
               srcY+=sliceH; remaining-=sliceH;
             }
-            let corrB64 = corrPdfDoc.output("datauristring").split(",")[1];
+            // Envoyer le corrigé directement en pièce jointe
+            // (la fusion avec la copie est optionnelle et séparée)
+            pdfB64 = corrPdfDoc.output("datauristring").split(",")[1];
+            pdfFilename = `corrige_${prenom}.pdf`;
 
-            // Si on a les copies PDF et les pages, fusionner copie + corrigé
+            // Si les copies sont disponibles, tenter la fusion
             const mergedForSend = copiesPdfs.length>1
-              ? await mergePdfs(copiesPdfs).catch(()=>copiesPdfs[0]?.b64)
-              : copiesPdfs[0]?.b64;
-            if(mergedForSend && window.PDFLib && c.pageStart && c.pageEnd){
-              setStatus(`Assemblage copie + corrigé pour ${prenom}…`);
-              const copiePdf = await extractPdfPages(mergedForSend, c.pageStart, c.pageEnd);
-              pdfB64 = await mergePdfs([{name:"copie",b64:copiePdf},{name:"corrige",b64:corrB64}]);
-              pdfFilename = `copie_corrigee_${prenom}.pdf`;
-            } else {
-              // Pas de copie disponible : envoyer juste le corrigé
-              pdfB64 = corrB64;
-              pdfFilename = `corrige_${prenom}.pdf`;
+              ? await mergePdfs(copiesPdfs).catch(()=>null)
+              : (copiesPdfs[0]?.b64 || null);
+            if(mergedForSend && c.pageStart && c.pageEnd){
+              try {
+                setStatus(`Assemblage copie + corrigé pour ${prenom}…`);
+                const copiePdf = await extractPdfPages(mergedForSend, c.pageStart, c.pageEnd);
+                // Convertir corrPdfDoc en pdf-lib compatible
+                const { PDFDocument } = window.PDFLib;
+                const corrBytes = Uint8Array.from(atob(pdfB64), ch=>ch.charCodeAt(0));
+                const copieBytes = Uint8Array.from(atob(copiePdf), ch=>ch.charCodeAt(0));
+                const merged = await PDFDocument.create();
+                const copieDoc = await PDFDocument.load(copieBytes);
+                const corrDoc2 = await PDFDocument.load(corrBytes);
+                const copiePages = await merged.copyPages(copieDoc, copieDoc.getPageIndices());
+                copiePages.forEach(p=>merged.addPage(p));
+                const corrPages = await merged.copyPages(corrDoc2, corrDoc2.getPageIndices());
+                corrPages.forEach(p=>merged.addPage(p));
+                const mergedBytes = await merged.save();
+                pdfB64 = btoa(String.fromCharCode(...mergedBytes));
+                pdfFilename = `copie_corrigee_${prenom}.pdf`;
+              } catch(e2) {
+                console.error("Fusion copie+corrigé échouée, envoi corrigé seul:", e2);
+                // pdfB64 reste le corrigé seul, ce qui est déjà bien
+              }
             }
           } catch(e) { console.error("Erreur PDF corrigé:", e); }
           try {
