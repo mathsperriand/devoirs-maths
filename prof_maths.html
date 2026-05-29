@@ -637,16 +637,78 @@
           if(c.skipped||!c.email)continue;
           setStatus(`Envoi à ${c.name}…`);
           const details=c.details?.map(d=>`• ${d.exercice} : ${d.obtenu}/${d.sur} — ${d.remarque}`).join("\n")||"";
-          const body=`Bonjour ${c.name},\n\nVoici votre résultat pour ce devoir de mathématiques.\n\nNOTE : ${c.note}/20\n\nAppréciation :\n${c.appreciation}\n\nDétail :\n${details}\n\nConseil :\n${c.conseil}\n\nCordialement,\nVotre professeur de mathématiques`;
+          const prenom = c.name.split(" ")[0];
+          const appreciation = (c.appreciation||"").replace(/il\/elle/gi,"tu").replace(/l'élève/gi,"tu").replace(new RegExp(c.name,"gi"), prenom);
+          const conseil = (c.conseil||"").replace(/il\/elle/gi,"tu").replace(/l'élève/gi,"tu").replace(new RegExp(c.name,"gi"), prenom);
+          const body=`Bonjour ${prenom},\n\nVoici ton résultat pour ce devoir de mathématiques.\n\nNOTE : ${c.note}/20\n\nAppréciation :\n${appreciation}\n\nDétail :\n${details}\n\nConseil :\n${conseil}\n\nCordialement,\nF. Nocca`;
           const subject=`Résultats – ${sessionName}`;
           let pdfB64=null, pdfFilename=null;
           const mergedForSend = copiesPdfs.length>1 ? await mergePdfs(copiesPdfs).catch(()=>copiesPdfs[0]?.b64) : copiesPdfs[0]?.b64;
           if(withPdfCopy&&mergedForSend&&window.PDFLib&&c.pageStart&&c.pageEnd){
             try{
-              setStatus(`Découpage copie de ${c.name}…`);
-              pdfB64=await extractPdfPages(mergedForSend,c.pageStart,c.pageEnd);
-              pdfFilename=`copie_${c.name.replace(/\s+/g,"_")}.pdf`;
-            }catch{}
+              setStatus(`Découpage et assemblage de la copie de ${prenom}…`);
+              const copiePdf = await extractPdfPages(mergedForSend,c.pageStart,c.pageEnd);
+
+              // ── Générer le corrigé LaTeX → HTML/KaTeX → canvas → PDF ──
+              setStatus(`Génération du corrigé LaTeX pour ${prenom}…`);
+
+              // Demander à l'IA un corrigé LaTeX structuré exercice par exercice
+              const corrLatex = await callClaude(apiKey, [{role:"user", content:
+                "Génère le corrigé détaillé en LaTeX pour " + prenom + " (note : " + c.note + "/20).\n" +
+                "SUJET :\n" + (latexSrc||"[sujet fourni en PDF]") + "\n\n" +
+                "DÉTAIL DE LA CORRECTION :\n" + (c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n") + "\n\n" +
+                "Retourne UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass), exercice par exercice avec toutes les formules en LaTeX.\n" +
+                "Format :\n\\section*{Corrigé Exercice 1}\n\\begin{enumerate}\n  \\item solution détaillée avec $formules$\n\\end{enumerate}\n..."
+              }], "Tu es professeur de maths. LaTeX rigoureux pour toutes les formules. Pas de \\documentclass.");
+
+              // Construire le HTML du corrigé complet
+              const noteColor = !isNaN(+c.note) ? (+c.note>=10?"#16a34a":"#dc2626") : "#111";
+              const corrHtml = `
+                <div style="font-family:Georgia,serif;max-width:700px;margin:0 auto;padding:32px;background:#fff;color:#111;line-height:1.7;font-size:13pt">
+                  <h1 style="font-size:16pt;border-bottom:1px solid #333;padding-bottom:8px;margin-bottom:16px">Corrigé — ${prenom}</h1>
+                  <p style="font-size:13pt;font-weight:bold;color:${noteColor};margin-bottom:4px">Note : ${c.note}/20</p>
+                  <p style="font-size:11pt;color:#555;margin-bottom:16px;font-style:italic">${appreciation}</p>
+                  ${latexToHtml(corrLatex)}
+                  <div style="margin-top:24px;padding:12px 16px;background:#eff6ff;border-left:3px solid #3b82f6;border-radius:4px;font-size:11pt;color:#1e40af">
+                    <strong>Conseil :</strong> ${conseil}
+                  </div>
+                  <p style="margin-top:24px;font-size:11pt;color:#555">Cordialement, F. Nocca</p>
+                </div>`;
+
+              // Rendre dans un div caché, capturer en canvas, convertir en PDF
+              const corrDiv = document.createElement("div");
+              corrDiv.style.cssText = "position:fixed;left:-9999px;top:0;width:794px;background:#fff";
+              corrDiv.innerHTML = corrHtml;
+              // Injecter la feuille KaTeX
+              const katexLink = document.createElement("link");
+              katexLink.rel="stylesheet"; katexLink.href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css";
+              corrDiv.prepend(katexLink);
+              document.body.appendChild(corrDiv);
+              await new Promise(r=>setTimeout(r,300)); // laisser KaTeX rendre
+
+              setStatus(`Mise en page PDF de la copie de ${prenom}…`);
+              const canvas = await window.html2canvas(corrDiv, {scale:2, useCORS:true, backgroundColor:"#fff"});
+              document.body.removeChild(corrDiv);
+
+              const {jsPDF} = window.jspdf;
+              const corrPdfDoc = new jsPDF({orientation:"portrait",unit:"mm",format:"a4"});
+              const W=corrPdfDoc.internal.pageSize.getWidth(), H=corrPdfDoc.internal.pageSize.getHeight(), m=10;
+              const iw=W-m*2; let remaining=(canvas.height*iw)/canvas.width, srcY=0;
+              while(remaining>0){
+                const sliceH=Math.min(remaining,H-m*2);
+                const sc=document.createElement("canvas"); const ratio=canvas.width/iw;
+                sc.width=canvas.width; sc.height=sliceH*ratio;
+                sc.getContext("2d").drawImage(canvas,0,srcY*ratio,canvas.width,sliceH*ratio,0,0,canvas.width,sliceH*ratio);
+                if(srcY>0) corrPdfDoc.addPage();
+                corrPdfDoc.addImage(sc.toDataURL("image/png"),"PNG",m,m,iw,sliceH);
+                srcY+=sliceH; remaining-=sliceH;
+              }
+              const corrB64 = corrPdfDoc.output("datauristring").split(",")[1];
+
+              // Fusionner copie + corrigé
+              pdfB64 = await mergePdfs([{name:"copie",b64:copiePdf},{name:"corrige",b64:corrB64}]);
+              pdfFilename=`copie_corrigee_${prenom}.pdf`;
+            }catch(e){ console.error(e); }
           }
           try {
             await sendGmail(c.email, subject, body, pdfB64, pdfFilename);
