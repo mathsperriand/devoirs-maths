@@ -644,82 +644,83 @@
           const subject=`Résultats – ${sessionName}`;
           let pdfB64=null, pdfFilename=null;
 
-          // ── Générer le corrigé LaTeX → HTML/KaTeX → canvas → PDF ──
+          // ── Générer le corrigé en PDF pur texte (jsPDF uniquement, sans canvas) ──
           try {
             setStatus(`Génération du corrigé pour ${prenom}…`);
-            const corrLatex = await callClaude(apiKey, [{role:"user", content:
-              "Génère le corrigé détaillé en LaTeX pour " + prenom + " (note : " + c.note + "/20).\n" +
+
+            // Demander un corrigé en texte simple (pas de LaTeX brut)
+            const corrTexte = await callClaude(apiKey, [{role:"user", content:
+              "Génère le corrigé détaillé pour " + prenom + " (note : " + c.note + "/20).\n" +
               "SUJET :\n" + (latexSrc||"[sujet fourni en PDF]") + "\n\n" +
               "DÉTAIL :\n" + (c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n") + "\n\n" +
-              "Retourne UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass), exercice par exercice avec toutes les formules en LaTeX.\n" +
-              "Format :\n\\section*{Corrigé Exercice 1}\n\\begin{enumerate}\n  \\item solution avec $formules$\n\\end{enumerate}"
-            }], "Tu es professeur de maths. LaTeX rigoureux. Pas de \\documentclass.");
-
-            const noteColor = !isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#111";
-            const corrHtml = `<div style="font-family:Georgia,serif;max-width:700px;margin:0 auto;padding:32px;background:#fff;color:#111;line-height:1.7;font-size:13pt">
-              <h1 style="font-size:16pt;border-bottom:1px solid #333;padding-bottom:8px;margin-bottom:16px">Corrigé — ${prenom}</h1>
-              <p style="font-size:13pt;font-weight:bold;color:${noteColor};margin-bottom:4px">Note : ${c.note}/20</p>
-              <p style="font-size:11pt;color:#555;margin-bottom:16px;font-style:italic">${appreciation}</p>
-              ${latexToHtml(corrLatex)}
-              <div style="margin-top:24px;padding:12px 16px;background:#eff6ff;border-left:3px solid #3b82f6;border-radius:4px;font-size:11pt;color:#1e40af">
-                <strong>Conseil :</strong> ${conseil}
-              </div>
-              <p style="margin-top:24px;font-size:11pt;color:#555">Cordialement, F. Nocca</p>
-            </div>`;
+              "Retourne le corrigé en texte simple lisible (pas de commandes LaTeX comme \\section etc.).\n" +
+              "Pour les formules mathématiques, écris-les de façon lisible : f(x) = 2x+3, racine(2), x^2, etc.\n" +
+              "Structure : Exercice 1, question par question avec la solution complète."
+            }], "Tu es professeur de maths. Texte lisible, formules en notation simple.");
 
             setStatus(`Mise en page PDF pour ${prenom}…`);
-            const corrDiv = document.createElement("div");
-            corrDiv.style.cssText = "position:fixed;left:-9999px;top:0;width:794px;background:#fff";
-            corrDiv.innerHTML = corrHtml;
-            document.body.appendChild(corrDiv);
-            await new Promise(r=>setTimeout(r,500));
-            const canvas = await window.html2canvas(corrDiv, {scale:2, useCORS:true, backgroundColor:"#fff"});
-            document.body.removeChild(corrDiv);
-
             const {jsPDF} = window.jspdf;
-            const corrPdfDoc = new jsPDF({orientation:"portrait",unit:"mm",format:"a4"});
-            const W=corrPdfDoc.internal.pageSize.getWidth(), H=corrPdfDoc.internal.pageSize.getHeight(), m=10;
-            const iw=W-m*2; let remaining=(canvas.height*iw)/canvas.width, srcY=0;
-            while(remaining>0){
-              const sliceH=Math.min(remaining,H-m*2);
-              const sc=document.createElement("canvas"); const ratio=canvas.width/iw;
-              sc.width=canvas.width; sc.height=sliceH*ratio;
-              sc.getContext("2d").drawImage(canvas,0,srcY*ratio,canvas.width,sliceH*ratio,0,0,canvas.width,sliceH*ratio);
-              if(srcY>0) corrPdfDoc.addPage();
-              corrPdfDoc.addImage(sc.toDataURL("image/png"),"PNG",m,m,iw,sliceH);
-              srcY+=sliceH; remaining-=sliceH;
-            }
-            // Envoyer le corrigé directement en pièce jointe
-            // (la fusion avec la copie est optionnelle et séparée)
-            pdfB64 = corrPdfDoc.output("datauristring").split(",")[1];
+            const pdf = new jsPDF({orientation:"portrait", unit:"mm", format:"a4"});
+            const marg=15, pw=180, lh=5.5;
+            let y = marg;
+
+            const writeLine = (txt, opts={}) => {
+              if (!txt) return;
+              pdf.setFont("helvetica", opts.bold?"bold":"normal");
+              pdf.setFontSize(opts.size||10);
+              pdf.setTextColor(...(opts.color||[0,0,0]));
+              const lines = pdf.splitTextToSize(String(txt), pw);
+              lines.forEach(line => {
+                if (y > 280) { pdf.addPage(); y = marg; }
+                pdf.text(line, marg, y);
+                y += lh;
+              });
+              y += (opts.after||1);
+            };
+
+            // En-tête
+            writeLine(`Corrigé — ${prenom}`, {bold:true, size:14, after:3});
+            const nc = !isNaN(+c.note)?(+c.note>=10?[22,163,74]:[220,38,38]):[0,0,0];
+            writeLine(`Note : ${c.note}/20`, {bold:true, size:12, color:nc, after:3});
+            writeLine(appreciation, {size:10, color:[80,80,80], after:4});
+
+            // Séparateur
+            pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
+
+            // Corps du corrigé
+            writeLine(corrTexte, {size:10, after:4});
+
+            // Séparateur
+            pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
+
+            // Conseil
+            writeLine("Conseil :", {bold:true, size:10, after:1});
+            writeLine(conseil, {size:10, color:[30,64,175], after:4});
+            writeLine("Cordialement, F. Nocca", {size:9, color:[100,100,100]});
+
+            pdfB64 = pdf.output("datauristring").split(",")[1];
             pdfFilename = `corrige_${prenom}.pdf`;
 
             // Si les copies sont disponibles, tenter la fusion
             const mergedForSend = copiesPdfs.length>1
               ? await mergePdfs(copiesPdfs).catch(()=>null)
-              : (copiesPdfs[0]?.b64 || null);
+              : (copiesPdfs[0]?.b64||null);
             if(mergedForSend && c.pageStart && c.pageEnd){
               try {
                 setStatus(`Assemblage copie + corrigé pour ${prenom}…`);
                 const copiePdf = await extractPdfPages(mergedForSend, c.pageStart, c.pageEnd);
-                // Convertir corrPdfDoc en pdf-lib compatible
-                const { PDFDocument } = window.PDFLib;
-                const corrBytes = Uint8Array.from(atob(pdfB64), ch=>ch.charCodeAt(0));
-                const copieBytes = Uint8Array.from(atob(copiePdf), ch=>ch.charCodeAt(0));
+                const {PDFDocument} = window.PDFLib;
                 const merged = await PDFDocument.create();
-                const copieDoc = await PDFDocument.load(copieBytes);
-                const corrDoc2 = await PDFDocument.load(corrBytes);
-                const copiePages = await merged.copyPages(copieDoc, copieDoc.getPageIndices());
-                copiePages.forEach(p=>merged.addPage(p));
-                const corrPages = await merged.copyPages(corrDoc2, corrDoc2.getPageIndices());
-                corrPages.forEach(p=>merged.addPage(p));
-                const mergedBytes = await merged.save();
-                pdfB64 = btoa(String.fromCharCode(...mergedBytes));
+                const copieDoc = await PDFDocument.load(Uint8Array.from(atob(copiePdf), ch=>ch.charCodeAt(0)));
+                const corrDoc2 = await PDFDocument.load(Uint8Array.from(atob(pdfB64), ch=>ch.charCodeAt(0)));
+                const cp = await merged.copyPages(copieDoc, copieDoc.getPageIndices());
+                cp.forEach(p=>merged.addPage(p));
+                const cr = await merged.copyPages(corrDoc2, corrDoc2.getPageIndices());
+                cr.forEach(p=>merged.addPage(p));
+                const mb = await merged.save();
+                pdfB64 = btoa(String.fromCharCode(...mb));
                 pdfFilename = `copie_corrigee_${prenom}.pdf`;
-              } catch(e2) {
-                console.error("Fusion copie+corrigé échouée, envoi corrigé seul:", e2);
-                // pdfB64 reste le corrigé seul, ce qui est déjà bien
-              }
+              } catch(e2) { console.warn("Fusion échouée, corrigé seul envoyé:", e2); }
             }
           } catch(e) { console.error("Erreur PDF corrigé:", e); }
           try {
