@@ -558,9 +558,9 @@
           const blocks=[
             ...(subjectMode==="upload"&&upSubPdf?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}}]:[]),
             {type:"document",source:{type:"base64",media_type:"application/pdf",data:mergedB64}},
-            {type:"text",text:`Copies des élèves :\n${studentList}\n\nSUJET${subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc}\n\nCORRIGÉ :\n${corrRef||"[utilise tes connaissances]"}\n\nIdentifie chaque copie, ses pages, corrige-la.\nJSON uniquement sans backticks :\n[{"name":"Nom Prénom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"..."}]`}
+            {type:"text",text:`Copies des élèves :\n${studentList}\n\nSUJET${subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc}\n\nCORRIGÉ :\n${corrRef||"[utilise tes connaissances]"}\n\nIdentifie chaque copie, ses pages, corrige-la.\nIMPORTANT : dans l'appréciation et le conseil, tutoie l'élève (tu, ton, ta) et utilise son prénom seul.\nJSON uniquement sans backticks :\n[{"name":"Nom Prénom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"Lucas, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}]`}
           ];
-          const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Correcteur bienveillant. JSON uniquement.");
+          const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
           const arr=JSON.parse(raw.replace(/```json|```/g,"").trim());
           setCorrections(students.map(s=>{
             const f=arr.find(r=>r.name?.toLowerCase().includes(s.name.split(" ")[0].toLowerCase()));
@@ -578,7 +578,7 @@
           if(!ans){results.push({...s,skipped:true});continue;}
           setStatus(`Correction de ${s.name}…`);
           try{
-            const raw=await callClaude(apiKey,[{role:"user",content:`Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name}:\n${answers[s.id]}\nJSON uniquement:\n{"note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"..."}`}],"Correcteur bienveillant. JSON uniquement.");
+            const raw=await callClaude(apiKey,[{role:"user",content:`Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name} (prénom: ${s.name.split(" ")[0]}):\n${answers[s.id]}\nIMPORTANT : tutoie l'élève et utilise son prénom seul dans l'appréciation et le conseil.\nJSON uniquement:\n{"note":14,"appreciation":"${s.name.split(" ")[0]}, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}`}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
             results.push({...s,...JSON.parse(raw.replace(/```json|```/g,"").trim())});
           }catch{results.push({...s,note:"?",appreciation:"Erreur.",details:[],conseil:""});}
         }
@@ -953,7 +953,7 @@
                         {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},
                         {type:"text",text:"Corrige cette copie en retard (PDF joint).\nSUJET"+(subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc)+"\nCORRIGÉ :\n"+(corrRef||"[utilise tes connaissances]")+"\nJSON uniquement sans backticks :\n[{\"name\":\"Nom Prénom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"}
                       ];
-                      const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Correcteur bienveillant. JSON uniquement.");
+                      const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
                       const arr=JSON.parse(raw.replace(/\`\`\`json|\`\`\`/g,"").trim());
                       if(arr.length>0){
                         const newC=arr[0];
