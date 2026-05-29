@@ -66,17 +66,23 @@
     function getGmailToken() {
       return new Promise((resolve, reject) => {
         if (gmailAccessToken) { resolve(gmailAccessToken); return; }
+        if (!window.google?.accounts?.oauth2) {
+          reject(new Error("Google Identity Services non chargé")); return;
+        }
         const client = window.google.accounts.oauth2.initTokenClient({
           client_id: GMAIL_CLIENT_ID,
           scope: GMAIL_SCOPE,
-          hint: GMAIL_SENDER,
+          login_hint: GMAIL_SENDER,
+          prompt: "consent",
           callback: (resp) => {
-            if (resp.error) { reject(resp.error); return; }
+            if (resp.error) { reject(new Error(resp.error)); return; }
             gmailAccessToken = resp.access_token;
-            // Expire après 1h
             setTimeout(() => { gmailAccessToken = null; }, (resp.expires_in - 60) * 1000);
             resolve(gmailAccessToken);
           },
+          error_callback: (err) => {
+            reject(new Error(err.type || "Autorisation refusée"));
+          }
         });
         client.requestAccessToken();
       });
@@ -620,10 +626,10 @@
         setBusy(true);
         // Obtenir le token Gmail une seule fois avant la boucle
         try {
-          setStatus("Connexion Gmail…");
+          setStatus("Connexion Gmail — choisissez maths.perriand@gmail.com…");
           await getGmailToken();
         } catch(e) {
-          setStatus("Erreur connexion Gmail : " + e);
+          setStatus("❌ " + (e.message || e) + " — Réessayez.");
           setBusy(false); return;
         }
         let errors = [];
