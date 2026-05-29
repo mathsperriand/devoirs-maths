@@ -883,13 +883,7 @@
                       const blocks=[
                         ...(subjectMode==="upload"&&upSubPdf?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}}]:[]),
                         {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},
-                        {type:"text",text:`Corrige cette copie en retard (PDF joint).
-SUJET${subjectMode==="upload"?" (voir PDF joint)":":
-"+latexSrc}
-CORRIGÉ :
-${corrRef||"[utilise tes connaissances]"}
-JSON uniquement sans backticks :
-[{"name":"Nom Prénom","pageStart":1,"pageEnd":1,"note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"..."}]`}
+                        {type:"text",text:"Corrige cette copie en retard (PDF joint).\nSUJET"+(subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc)+"\nCORRIGÉ :\n"+(corrRef||"[utilise tes connaissances]")+"\nJSON uniquement sans backticks :\n[{\"name\":\"Nom Prénom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"}
                       ];
                       const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Correcteur bienveillant. JSON uniquement.");
                       const arr=JSON.parse(raw.replace(/\`\`\`json|\`\`\`/g,"").trim());
