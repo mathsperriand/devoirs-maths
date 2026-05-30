@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Gestionnaire de devoirs — Maths</title>
+  <title>Gestionnaire de devoirs — Maths (Gemini)</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -29,7 +30,6 @@
     textarea { resize: vertical; }
     select:focus, textarea:focus, input:focus { outline: 2px solid #1d4ed8; outline-offset: 1px; }
     h1 { font-size: 18px; font-weight: 600; }
-    /* Variables CSS */
     :root {
       --color-background-primary: #fff;
       --color-background-secondary: #f3f4f6;
@@ -75,7 +75,7 @@
         const client = window.google.accounts.oauth2.initTokenClient({
           client_id: GMAIL_CLIENT_ID,
           scope: GMAIL_SCOPE,
-          login_hint: GMAIL_SENDER,
+          login_hint: "maths.perriand@gmail.com", // Force la suggestion de ce mail exact
           callback: (resp) => {
             clearTimeout(timer);
             if (settled) return;
@@ -90,26 +90,14 @@
             if (!settled) { settled = true; reject(new Error(err.type || "Autorisation refusée")); }
           }
         });
-        client.requestAccessToken({ prompt: "select_account" });
+        window.google?.accounts?.oauth2?.revoke(gmailAccessToken, () => {});
+client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmail.com" });
       });
     }
 
-    // Charge pdf-lib dynamiquement si besoin
-    async function loadPdfLib() {
-      if (window.PDFLib) return window.PDFLib;
-      return new Promise((resolve, reject) => {
-        const s = document.createElement("script");
-        s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
-        s.onload = () => resolve(window.PDFLib);
-        s.onerror = reject;
-        document.head.appendChild(s);
-      });
-    }
-
-    // Fusionne plusieurs PDFs base64 en un seul
     async function mergePdfs(pdfList) {
       if (pdfList.length === 1) return pdfList[0].b64;
-      const { PDFDocument } = await loadPdfLib();
+      const { PDFDocument } = window.PDFLib;
       const merged = await PDFDocument.create();
       for (const p of pdfList) {
         const bytes = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0));
@@ -121,7 +109,6 @@
       return uint8ToBase64(bytes);
     }
 
-    // Convertit Uint8Array → base64 sans stack overflow (chunked)
     function uint8ToBase64(bytes) {
       let binary = "";
       const chunkSize = 8192;
@@ -131,13 +118,11 @@
       return btoa(binary);
     }
 
-    // Encode en base64url
     function b64url(str) {
       return btoa(unescape(encodeURIComponent(str)))
         .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
     }
 
-    // Construit un message MIME simple (sans pièce jointe)
     function buildMime(to, subject, body) {
       const msg = [
         `From: ${GMAIL_SENDER}`,
@@ -152,7 +137,6 @@
       return b64url(msg);
     }
 
-    // Construit un message MIME multipart (avec pièce jointe PDF)
     function buildMimeWithPdf(to, subject, body, pdfBase64, pdfFilename) {
       const boundary = "boundary_" + Math.random().toString(36).slice(2);
       const parts = [
@@ -180,7 +164,6 @@
       return b64url(parts);
     }
 
-    // Envoie via Gmail API
     async function sendGmail(to, subject, body, pdfBase64=null, pdfFilename=null) {
       const token = await getGmailToken();
       const raw   = pdfBase64
@@ -224,21 +207,35 @@
       return "s_" + Date.now();
     }
 
-    /* ── API Claude ── */
-    async function callClaude(apiKey, messages, system) {
-      const body = { model: "claude-sonnet-4-6", max_tokens: 2000, messages };
-      if (system) body.system = system;
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+    /* ── API Google Gemini ── */
+    async function callGemini(apiKey, parts, systemInstruction = null, jsonMode = false) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const body = {
+        contents: [{ parts: parts }]
+      };
+      
+      const generationConfig = {};
+      if (jsonMode) {
+        generationConfig.responseMimeType = "application/json";
+      }
+      if (Object.keys(generationConfig).length > 0) {
+        body.generationConfig = generationConfig;
+      }
+      
+      if (systemInstruction) {
+        body.systemInstruction = { parts: [{ text: systemInstruction }] };
+      }
+
+      const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
-      return data.content?.map(b => b.text || "").join("") || "";
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
     }
 
-    /* ── Élèves ── */
     function parseStudents(raw) {
       return raw.trim().split("\n").filter(Boolean).map((line, i) => {
         const [name, email] = line.split(",").map(s => s.trim());
@@ -246,20 +243,6 @@
       });
     }
 
-    /* ── Découpe PDF ── */
-    async function extractPdfPages(pdfBase64, pageStart, pageEnd) {
-      const { PDFDocument } = await loadPdfLib();
-      const src = Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0));
-      const srcDoc = await PDFDocument.load(src);
-      const newDoc = await PDFDocument.create();
-      const idx = Array.from({ length: pageEnd - pageStart + 1 }, (_, i) => pageStart - 1 + i);
-      const copied = await newDoc.copyPages(srcDoc, idx);
-      copied.forEach(p => newDoc.addPage(p));
-      const bytes = await newDoc.save();
-      return uint8ToBase64(bytes);
-    }
-
-    /* ── LaTeX → HTML ── */
     function latexToHtml(src) {
       if (!window.katex) return `<pre>${src}</pre>`;
       let html = src
@@ -294,7 +277,6 @@
       return '<p style="margin:6px 0">' + html + '</p>';
     }
 
-    /* ── Micro-composants ── */
     function Card({ children }) {
       return <div style={{ background:"#fff", border:"0.5px solid #e5e7eb", borderRadius:10, padding:"1.25rem", marginBottom:"1rem" }}>{children}</div>;
     }
@@ -315,9 +297,6 @@
       return <span style={{ fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:6, background:bg, color:tc }}>{children}</span>;
     }
 
-    /* ════════════════════════════════════════════════════════
-       APPLICATION
-    ════════════════════════════════════════════════════════ */
     /* ════ SessionManager ════ */
     function SessionManager({ onSelect }) {
       const [sessions, setSessions] = useState(() => getAllSessions());
@@ -350,10 +329,9 @@
 
       return (
         <div style={{ maxWidth:700, margin:"0 auto", padding:"2rem 1rem" }}>
-          <h1 style={{ marginBottom:8 }}>📐 Gestionnaire de devoirs</h1>
+          <h1 style={{ marginBottom:8 }}>📐 Gestionnaire de devoirs (Gemini)</h1>
           <p style={{ fontSize:13, color:"#6b7280", marginBottom:"1.5rem" }}>Chaque devoir est indépendant — ouvrez-en plusieurs dans des onglets différents.</p>
 
-          {/* Reprendre le dernier devoir */}
           {lastSession && (
             <div style={{ background:"#dbeafe", border:"0.5px solid #93c5fd", borderRadius:10, padding:"14px 16px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
               <div>
@@ -366,7 +344,6 @@
             </div>
           )}
 
-          {/* Nouveau devoir */}
           <Card>
             <div style={{ fontSize:14, fontWeight:500, marginBottom:10 }}>➕ Nouveau devoir</div>
             <div style={{ display:"flex", gap:8 }}>
@@ -378,7 +355,6 @@
             </div>
           </Card>
 
-          {/* Liste des devoirs existants */}
           {entries.length > 0 && (
             <Card>
               <div style={{ fontSize:14, fontWeight:500, marginBottom:10 }}>📂 Devoirs existants</div>
@@ -414,7 +390,6 @@
       );
     }
 
-    /* ════ App (devoir unique) ════ */
     function App() {
       const [sessionId,   setSessionId]   = useState(null);
       const [sessionName, setSessionName] = useState("");
@@ -430,14 +405,14 @@
       return <Devoir sessionId={sessionId} sessionName={sessionName} onBack={()=>{ setSessionId(null); setSessionName(""); }}/>;
     }
 
-    /* ════ Devoir (logique principale) ════ */
+    /* ── Devoir (logique principale) ── */
     function Devoir({ sessionId, sessionName, onBack }) {
       const load = (key, fallback) => { const s=getSession(sessionId); return s[key]!==undefined?s[key]:fallback; };
       const persist = (key, val) => {
         const s=getSession(sessionId); s[key]=val; saveSession(sessionId, {...getAllSessions()[sessionId],...s,[key]:val});
       };
 
-      const [apiKey,  setApiKey]  = useState(() => { try{return localStorage.getItem("prof_maths_apikey")||"";}catch{return "";} });
+      const [apiKey,  setApiKey]  = useState(() => { try{return localStorage.getItem("prof_maths_gemini_apikey")||"";}catch{return "";} });
       const [step,    setStepRaw] = useState(() => load("step", 0));
       const setStep = v => { setStepRaw(v); persist("step",v); };
       const [busy,    setBusy]    = useState(false);
@@ -445,7 +420,7 @@
       const [libsOk,  setLibsOk]  = useState({ h2c: !!window.html2canvas, jspdf: !!window.jspdf });
       const previewRef = useRef(null);
 
-      useEffect(()=>{ try{localStorage.setItem("prof_maths_apikey",apiKey);}catch{} },[apiKey]);
+      useEffect(()=>{ try{localStorage.setItem("prof_maths_gemini_apikey",apiKey);}catch{} },[apiKey]);
 
       /* Étape 0 */
       const [subjectMode,  setSubjectModeRaw]  = useState(() => load("subjectMode", "generate"));
@@ -464,12 +439,20 @@
       const [studentsRaw,   setStudentsRawRaw]   = useState(() => load("studentsRaw", ""));
       const setStudentsRaw = v => { setStudentsRawRaw(v); persist("studentsRaw",v); };
       const [extracting,    setExtracting]        = useState(false);
-      // Liste de PDFs : [{name, b64}]
       const [copiesPdfs,    setCopiesPdfsRaw]     = useState([]);
-      const setCopiesPdfs = v => setCopiesPdfsRaw(v);
-      // Alias pratique : PDF fusionné (calculé à la volée)
-      const copiesPdf     = copiesPdfs.length > 0 ? copiesPdfs[0].b64 : null; // utilisé pour compat
-      const copiesPdfName = copiesPdfs.map(p=>p.name).join(", ");
+
+      const setCopiesPdfs = (v) => {
+        if (typeof v === 'function') {
+          setCopiesPdfsRaw(prev => {
+            const next = v(prev);
+            persist("copiesPdfsCount", next.length);
+            return next;
+          });
+        } else {
+          setCopiesPdfsRaw(v);
+          persist("copiesPdfsCount", v.length);
+        }
+      };
 
       /* Étape 2 */
       const [answers,     setAnswersRaw]     = useState(() => load("answers", {}));
@@ -480,7 +463,6 @@
       /* Étape 3 */
       const [mailsDone,   setMailsDoneRaw]   = useState(() => load("mailsDone", false));
       const setMailsDone = v => { setMailsDoneRaw(v); persist("mailsDone",v); };
-      const [withPdfCopy, setWithPdfCopy]    = useState(true);
 
       useEffect(()=>{
         const check = () => setLibsOk({ h2c:!!window.html2canvas, jspdf:!!window.jspdf });
@@ -488,33 +470,38 @@
       },[]);
 
       const students    = parseStudents(studentsRaw);
+      const hasAnswers  = Object.values(answers).some(a => a && a.trim());
       const validCorrs  = corrections.filter(c=>!c.skipped);
       const avg         = validCorrs.filter(c=>!isNaN(+c.note)).reduce((a,c,_,arr)=>a+ +c.note/arr.length,0);
-      const hasPdfPages = corrections.some(c=>c.pageStart);
-      const hasAnswers  = Object.values(answers).some(v=>v?.trim());
+      const copiesPdfName = copiesPdfs.map(p=>p.name).join(", ");
       const canNext     = [(subjectMode==="generate"?!!latexSrc:!!upSubPdf), true, corrections.length>0, true][step];
 
       const readPdf = (file, cb) => {
         const r = new FileReader(); r.onload = e => cb(e.target.result.split(",")[1]); r.readAsDataURL(file);
       };
+
       const addCopiesPdf = (files) => {
         const arr = Array.from(files).filter(f=>f.type==="application/pdf");
         if (!arr.length) return;
+        
         let loaded = 0;
+        let firstB64 = null;
+        
         arr.forEach(file => {
           readPdf(file, b64 => {
-            setCopiesPdfs(prev => {
-              const next = [...prev, {name: file.name, b64}];
-              loaded++;
-              // Extraire les noms depuis le premier PDF ajouté si liste vide
-              if (prev.length === 0 && loaded === 1) extractNames(b64);
-              return next;
-            });
+            if (loaded === 0) {
+              firstB64 = b64;
+            }
+            setCopiesPdfs(prev => [...prev, {name: file.name, b64}]);
+            loaded++;
+            
+            if (loaded === arr.length && firstB64) {
+              extractNames(firstB64);
+            }
           });
         });
       };
-      // Compat alias
-      const handleCopiesPdf = (file) => addCopiesPdf([file]);
+
       const handleSubjectPdf = (file) => {
         if (!file||file.type!=="application/pdf") return;
         setUpSubPdfName(file.name);
@@ -522,27 +509,31 @@
       };
 
       const extractNames = async (b64) => {
-        if (!b64||!apiKey) return;
+        if (!b64 || !apiKey) return;
         setExtracting(true);
         try {
-          const raw = await callClaude(apiKey, [{ role:"user", content:[
-            { type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } },
-            { type:"text", text:"Extrais le nom complet et l'email de chaque élève depuis ces copies.\nJSON uniquement sans backticks :\n[{\"name\":\"Prénom Nom\",\"email\":\"...\"}]\nSi pas d'email visible, mets \"\"." }
-          ]}], "Tu extrais des noms d'élèves. JSON uniquement.");
-          const arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
-          setStudentsRaw(arr.map(s=>s.email?`${s.name}, ${s.email}`:s.name).join("\n"));
-        } catch(e) { console.error(e); }
+          const parts = [
+            { inlineData: { mimeType: "application/pdf", data: b64 } },
+            { text: "Extrais le nom complet et l'email de chaque élève présent dans ces copies.\nRetourne uniquement un tableau JSON contenant des objets avec les clés 'name' et 'email'. Si aucun email n'est visible, laisse la chaîne vide \"\"." }
+          ];
+          const raw = await callGemini(apiKey, parts, "Tu extrais exclusivement des listes d'élèves. Réponds en JSON pur, sans formatage Markdown.", true);
+          const arr = JSON.parse(raw.trim());
+          if (Array.isArray(arr)) {
+            const formatted = arr.map(s => s.email ? `${s.name}, ${s.email}` : s.name).join("\n");
+            setStudentsRaw(formatted);
+          }
+        } catch(e) { 
+          console.error("Erreur d'extraction :", e); 
+        }
         setExtracting(false);
       };
 
       const generateSubject = async () => {
         if (!consignes.trim()||!apiKey) return;
-        setBusy(true); setStatus("Génération du sujet en LaTeX…");
+        setBusy(true); setStatus("Génération du sujet avec Gemini…");
         try {
-          const res = await callClaude(apiKey, [{ role:"user", content:
-            `Génère un sujet de mathématiques en LaTeX selon ces consignes :\n${consignes}\n\nRetourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), puis la correction séparée par ---CORRECTION--- :\n\n\\begin{center}\n{\\Large\\textbf{Devoir de mathématiques}}\\\\[4pt]\n{\\normalsize [Niveau] \\hfill Durée : 1h}\n\\end{center}\n\\vspace{8pt}\n\\section*{Exercice 1 --- [titre] \\hfill (X points)}\n\\begin{enumerate}\n  \\item Énoncé avec $f(x) = ...$\n\\end{enumerate}\n\n---CORRECTION---\n\\section*{Corrigé exercice 1}\n...` }],
-            "Tu es professeur de mathématiques au lycée français. LaTeX rigoureux pour toutes les formules."
-          );
+          const parts = [{ text: `Génère un sujet de mathématiques en LaTeX selon ces consignes :\n${consignes}\n\nRetourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), puis la correction séparée par ---CORRECTION--- :\n\n\\begin{center}\n{\\Large\\textbf{Devoir de mathématiques}}\\\\[4pt]\n{\\normalsize [Niveau] \\hfill Durée : 1h}\n\\end{center}\n\\vspace{8pt}\n\\section*{Exercice 1 --- [titre] \\hfill (X points)}\n\\begin{enumerate}\n  \\item Énoncé avec $f(x) = ...$\n\\end{enumerate}\n\n---CORRECTION---\n\\section*{Corrigé exercice 1}\n...` }];
+          const res = await callGemini(apiKey, parts, "Tu es professeur de mathématiques au lycée français. LaTeX rigoureux pour toutes les formules.", false);
           const sep = res.indexOf("---CORRECTION---");
           setLatexSrc(sep>0?res.slice(0,sep).trim():res);
           setCorrRef(sep>0?res.slice(sep+16).trim():"");
@@ -580,16 +571,18 @@
         let mergedB64;
         try { mergedB64 = await mergePdfs(copiesPdfs); }
         catch(e) { setStatus("Erreur fusion PDF : "+e.message); setBusy(false); return; }
-        setStatus("Lecture et correction en cours…");
+        setStatus("Lecture et correction par Gemini…");
         const studentList=students.map(s=>`- ${s.name}`).join("\n");
         try {
-          const blocks=[
-            ...(subjectMode==="upload"&&upSubPdf?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}}]:[]),
-            {type:"document",source:{type:"base64",media_type:"application/pdf",data:mergedB64}},
-            {type:"text",text:`Copies des élèves :\n${studentList}\n\nSUJET${subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc}\n\nCORRIGÉ :\n${corrRef||"[utilise tes connaissances]"}\n\nIdentifie chaque copie, ses pages, corrige-la.\nIMPORTANT : dans l'appréciation et le conseil, tutoie l'élève (tu, ton, ta) et utilise son prénom seul.\nJSON uniquement sans backticks :\n[{"name":"Nom Prénom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"Lucas, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}]`}
-          ];
-          const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
-          const arr=JSON.parse(raw.replace(/```json|```/g,"").trim());
+          const parts = [];
+          if (subjectMode==="upload" && upSubPdf) {
+            parts.push({ inlineData: { mimeType: "application/pdf", data: upSubPdf } });
+          }
+          parts.push({ inlineData: { mimeType: "application/pdf", data: mergedB64 } });
+          parts.push({ text: `Copies des élèves :\n${studentList}\n\nSUJET${subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc}\n\nCORRIGÉ :\n${corrRef||"[utilise tes connaissances]"}\n\nIdentifie chaque copie, ses pages, corrige-la.\nIMPORTANT : dans l'appréciation et le conseil, tutoie l'élève (tu, ton, ta) et utilise son prénom seul.\nRetourne exclusivement un tableau JSON : [{"name":"Nom Prénom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"Lucas, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}]` });
+          
+          const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève et utilise son prénom seul. Réponds uniquement en JSON pur.", true);
+          const arr = JSON.parse(raw.trim());
           setCorrections(students.map(s=>{
             const f=arr.find(r=>r.name?.toLowerCase().includes(s.name.split(" ")[0].toLowerCase()));
             return f?{...s,...f}:{...s,skipped:true};
@@ -606,8 +599,9 @@
           if(!ans){results.push({...s,skipped:true});continue;}
           setStatus(`Correction de ${s.name}…`);
           try{
-            const raw=await callClaude(apiKey,[{role:"user",content:`Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name} (prénom: ${s.name.split(" ")[0]}):\n${answers[s.id]}\nIMPORTANT : tutoie l'élève et utilise son prénom seul dans l'appréciation et le conseil.\nJSON uniquement:\n{"note":14,"appreciation":"${s.name.split(" ")[0]}, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}`}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
-            results.push({...s,...JSON.parse(raw.replace(/```json|```/g,"").trim())});
+            const parts = [{ text: `Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name} (prénom: ${s.name.split(" ")[0]}):\n${answers[s.id]}\nIMPORTANT : tutoie l'élève et utilise son prénom seul dans l'appréciation et le conseil.\nJSON uniquement:\n{"note":14,"appreciation":"${s.name.split(" ")[0]}, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}` }];
+            const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Réponds exclusivement en JSON.", true);
+            results.push({...s,...JSON.parse(raw.trim())});
           }catch{results.push({...s,note:"?",appreciation:"Erreur.",details:[],conseil:""});}
         }
         setCorrections(results);setBusy(false);setStatus("");
@@ -615,7 +609,6 @@
 
       const exportCsv = () => {
         const allDetails = validCorrs[0]?.details || [];
-        // En-tête : colonnes fixes + une colonne par exercice (note + remarque)
         const detHeaders = allDetails.map(d => `"${d.exercice} (obtenu/sur)","${d.exercice} (remarque)"`).join(",");
         const header = `"Nom","Note /20","Appréciation","Conseil",${detHeaders}`;
         const rows = validCorrs.map(c => {
@@ -633,7 +626,6 @@
           }).join(",");
           return base + "," + detCells;
         });
-        // BOM UTF-8 pour Excel
         const bom = "\uFEFF";
         const a = document.createElement("a");
         a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(bom + [header,...rows].join("\n"));
@@ -669,7 +661,6 @@
 
       const sendResults = async () => {
         setBusy(true);
-        // Obtenir le token Gmail une seule fois avant la boucle
         try {
           setStatus("Connexion Gmail — choisissez maths.perriand@gmail.com…");
           await getGmailToken();
@@ -689,19 +680,15 @@
           const subject=`Résultats – ${sessionName}`;
           let pdfB64=null, pdfFilename=null;
 
-          // ── Générer le corrigé en PDF pur texte (jsPDF uniquement, sans canvas) ──
           try {
             setStatus(`Génération du corrigé pour ${prenom}…`);
-
-            // Demander un corrigé en texte simple (pas de LaTeX brut)
-            const corrTexte = await callClaude(apiKey, [{role:"user", content:
-              "Génère le corrigé détaillé pour " + prenom + " (note : " + c.note + "/20).\n" +
+            const parts = [{ text: "Génère le corrigé détaillé pour " + prenom + " (note : " + c.note + "/20).\n" +
               "SUJET :\n" + (latexSrc||"[sujet fourni en PDF]") + "\n\n" +
               "DÉTAIL :\n" + (c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n") + "\n\n" +
-              "Retourne le corrigé en texte simple lisible (pas de commandes LaTeX comme \\section etc.).\n" +
-              "Pour les formules mathématiques, écris-les de façon lisible : f(x) = 2x+3, racine(2), x^2, etc.\n" +
-              "Structure : Exercice 1, question par question avec la solution complète."
-            }], "Tu es professeur de maths. Texte lisible, formules en notation simple.");
+              "Retourne le corrigé en texte simple lisible. Pour les formules mathématiques, écris-les de façon lisible : f(x) = 2x+3, racine(2), x^2, etc.\n" +
+              "Structure : Exercice 1, question par question avec la solution complète." }];
+            
+            const corrTexte = await callGemini(apiKey, parts, "Tu es professeur de maths. Texte lisible, formules en notation simple.", false);
 
             setStatus(`Mise en page PDF pour ${prenom}…`);
             const {jsPDF} = window.jspdf;
@@ -723,22 +710,13 @@
               y += (opts.after||1);
             };
 
-            // En-tête
             writeLine(`Corrigé — ${prenom}`, {bold:true, size:14, after:3});
             const nc = !isNaN(+c.note)?(+c.note>=10?[22,163,74]:[220,38,38]):[0,0,0];
             writeLine(`Note : ${c.note}/20`, {bold:true, size:12, color:nc, after:3});
             writeLine(appreciation, {size:10, color:[80,80,80], after:4});
-
-            // Séparateur
             pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
-
-            // Corps du corrigé
             writeLine(corrTexte, {size:10, after:4});
-
-            // Séparateur
             pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
-
-            // Conseil
             writeLine("Conseil :", {bold:true, size:10, after:1});
             writeLine(conseil, {size:10, color:[30,64,175], after:4});
             writeLine("Cordialement, F. Nocca", {size:9, color:[100,100,100]});
@@ -747,7 +725,6 @@
             pdfB64 = uint8ToBase64(new Uint8Array(pdfArrayBuffer));
             pdfFilename = `corrige_${prenom}.pdf`;
 
-            // Corrigé seul en pièce jointe (fusion avec copie désactivée pour stabilité)
           } catch(e) { console.error("Erreur PDF corrigé:", e); }
           try {
             await sendGmail(c.email, subject, body, pdfB64, pdfFilename);
@@ -762,7 +739,6 @@
 
       return (
         <div style={{ maxWidth:700, margin:"0 auto", padding:"1.5rem 1rem" }}>
-          {/* Header */}
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"1.5rem" }}>
             <div>
               <h1 style={{ fontSize:16, marginBottom:2 }}>📐 {sessionName}</h1>
@@ -771,16 +747,14 @@
             <div style={{ fontSize:11, color:"#9ca3af" }}>💾 Sauvegarde automatique</div>
           </div>
 
-          {/* Clé API */}
           <Card>
-            <Field label="🔑 Clé API Anthropic">
-              <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="sk-ant-api03-..." style={{ fontFamily:"monospace" }}/>
+            <Field label="🔑 Clé API Google AI Studio (Gemini)">
+              <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="AIzaSy..." style={{ fontFamily:"monospace" }}/>
             </Field>
-            {!apiKey&&<p style={{ fontSize:12,color:"#dc2626",marginTop:6 }}>⚠️ Saisissez votre clé API pour activer l'outil.</p>}
-            {apiKey&&<p style={{ fontSize:12,color:"#16a34a",marginTop:6 }}>✓ Clé partagée entre tous les devoirs.</p>}
+            {!apiKey&&<p style={{ fontSize:12,color:"#dc2626",marginTop:6 }}>⚠️ Saisissez votre clé API Gemini pour activer l'outil.</p>}
+            {apiKey&&<p style={{ fontSize:12,color:"#16a34a",marginTop:6 }}>✓ Clé configurée avec succès.</p>}
           </Card>
 
-          {/* Stepper */}
           <div style={{ display:"flex", alignItems:"flex-start", marginBottom:"2rem" }}>
             {STEPS.map((label,i)=>{
               const done=i<step,active=i===step;
@@ -803,7 +777,6 @@
             })}
           </div>
 
-          {/* ═══ STEP 0 ═══ */}
           {step===0&&(<>
             <div style={{ display:"flex",gap:8,marginBottom:16 }}>
               {[["generate","✨ Générer avec l'IA"],["upload","📂 J'ai déjà un sujet (PDF)"]].map(([mode,lbl])=>(
@@ -851,7 +824,6 @@
             )}
           </>)}
 
-          {/* ═══ STEP 1 ═══ */}
           {step===1&&(<>
             {subjectMode==="generate"&&(
               <Card>
@@ -891,7 +863,7 @@
                   :<span style={{ color:"#6b7280",fontSize:13 }}>📄 Déposez le(s) PDF des copies pour extraire les noms<br/><span style={{ fontSize:11 }}>(réutilisé à l'étape Correction)</span></span>}
               </div>
               {extracting&&<p style={{ fontSize:12,color:"#1d4ed8",marginBottom:8,textAlign:"center" }}>🔍 Extraction des noms en cours…</p>}
-              <Field label={copiesPdf?"Noms extraits — vérifiez et complétez les emails":"Ou saisissez manuellement — Nom Prénom, email"}>
+              <Field label={copiesPdfs.length>0?"Noms extraits — vérifiez et complétez les emails":"Ou saisissez manuellement — Nom Prénom, email"}>
                 <textarea value={studentsRaw} onChange={e=>setStudentsRaw(e.target.value)}
                   placeholder={"Marie Dupont, marie.dupont@lycee.fr\nPaul Martin, paul.martin@lycee.fr"}
                   style={{ minHeight:100,fontFamily:"monospace",fontSize:12 }}/>
@@ -899,13 +871,11 @@
             </Card>
           </>)}
 
-          {/* ═══ STEP 2 ═══ */}
           {step===2&&(<>
             {corrections.length===0&&(
               <Card>
                 <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>📄 Copies à corriger</div>
 
-                {/* Zone dépôt multi-PDF */}
                 <div onDragOver={e=>e.preventDefault()}
                   onDrop={e=>{e.preventDefault();addCopiesPdf(e.dataTransfer.files);}}
                   onClick={()=>document.getElementById("copies-pdf2").click()}
@@ -913,12 +883,11 @@
                   <input id="copies-pdf2" type="file" accept="application/pdf" multiple style={{ display:"none" }}
                     onChange={e=>addCopiesPdf(e.target.files)}/>
                   {copiesPdfs.length===0
-                    ? <span style={{ color:"#6b7280",fontSize:13 }}>Glissez un ou plusieurs PDFs ici ou cliquez<br/><span style={{ fontSize:11 }}>Vous pouvez déposer les copies en plusieurs fichiers séparés</span></span>
+                    ? <span style={{ color:"#6b7280",fontSize:13 }}>Glissez un ou plusieurs PDFs ici ou cliquez</span>
                     : <span style={{ color:"#16a34a",fontSize:13 }}>✓ {copiesPdfs.length} fichier{copiesPdfs.length>1?"s":""} chargé{copiesPdfs.length>1?"s":""}</span>
                   }
                 </div>
 
-                {/* Liste des PDFs chargés */}
                 {copiesPdfs.length>0&&(
                   <div style={{ marginBottom:10 }}>
                     {copiesPdfs.map((p,i)=>(
@@ -937,7 +906,7 @@
                   </div>
                 )}
 
-                {copiesPdfs.length>0&&<button disabled={busy||!apiKey} onClick={correctFromPdf} style={{ width:"100%",marginBottom:8 }}>{busy?status:"🤖 Corriger depuis les PDFs ↗"}</button>}
+                {copiesPdfs.length>0&&<button disabled={busy||!apiKey} onClick={correctFromPdf} style={{ width:"100%",marginBottom:8 }}>{busy?status:"🤖 Corriger depuis les PDFs avec Gemini ↗"}</button>}
                 <div style={{ textAlign:"center",fontSize:12,color:"#9ca3af",margin:"10px 0 6px" }}>— ou saisir manuellement —</div>
                 {students.map(s=>(
                   <Card key={s.id}>
@@ -987,13 +956,15 @@
                   readPdf(f, async b64 => {
                     setCopiesPdfs(prev=>[...prev,{name:f.name,b64}]);
                     try {
-                      const blocks=[
-                        ...(subjectMode==="upload"&&upSubPdf?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}}]:[]),
-                        {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},
-                        {type:"text",text:"Corrige cette copie en retard (PDF joint).\nSUJET"+(subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc)+"\nCORRIGÉ :\n"+(corrRef||"[utilise tes connaissances]")+"\nJSON uniquement sans backticks :\n[{\"name\":\"Nom Prénom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"}
-                      ];
-                      const raw=await callClaude(apiKey,[{role:"user",content:blocks}],"Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève (tu maîtrises, tu dois, tu as bien...) et utilise son prénom seul. JSON uniquement.");
-                      const arr=JSON.parse(raw.replace(/\`\`\`json|\`\`\`/g,"").trim());
+                      const parts = [];
+                      if (subjectMode==="upload" && upSubPdf) {
+                        parts.push({ inlineData: { mimeType: "application/pdf", data: upSubPdf } });
+                      }
+                      parts.push({ inlineData: { mimeType: "application/pdf", data: b64 } });
+                      parts.push({ text: "Corrige cette copie en retard (PDF joint).\nSUJET"+(subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc)+"\nCORRIGÉ :\n"+(corrRef||"[utilise tes connaissances]")+"\nRetourne uniquement un tableau JSON contenant un objet représentant la copie : [{\"name\":\"Nom Prénom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]" });
+                      
+                      const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Réponds uniquement en JSON pur.", true);
+                      const arr = JSON.parse(raw.trim());
                       if(arr.length>0){
                         const newC=arr[0];
                         const existingStudent=students.find(s=>s.name.toLowerCase().includes(newC.name?.split(" ")[0]?.toLowerCase()));
@@ -1007,7 +978,6 @@
             </>)}
           </>)}
 
-          {/* ═══ STEP 3 ═══ */}
           {step===3&&(
             <Card>
               <div style={{ display:"flex",gap:8,marginBottom:16 }}>
@@ -1046,19 +1016,18 @@
             </Card>
           )}
 
-          {/* Nav */}
           <div style={{ display:"flex",justifyContent:"space-between",marginTop:"1.5rem" }}>
             {step>0?<button style={{ background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db" }} disabled={busy} onClick={()=>setStep(step-1)}>← Retour</button>:<div/>}
             {step<3&&<button disabled={!canNext||busy||!apiKey} onClick={()=>setStep(step+1)}>
               {["Diffuser →","Corriger les copies →","Voir les résultats →"][step]}
             </button>}
           </div>
-          <p style={{ textAlign:"center",fontSize:11,color:"#9ca3af",marginTop:"2rem" }}>Powered by Claude (Anthropic)</p>
+          <p style={{ textAlign:"center",fontSize:11,color:"#9ca3af",marginTop:"2rem" }}>Propulsé par Google Gemini</p>
         </div>
       );
     }
 
-        ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
   </script>
 </body>
 </html>
