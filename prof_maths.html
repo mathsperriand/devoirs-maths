@@ -3,16 +3,20 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Gestionnaire de devoirs — Maths (Gemini)</title>
+  <title>Gestionnaire de devoirs — Maths (Version Corrigée)</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    // Configuration globale pour PDF.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #f9fafb; color: #111827; min-height: 100vh; }
@@ -75,7 +79,7 @@
         const client = window.google.accounts.oauth2.initTokenClient({
           client_id: GMAIL_CLIENT_ID,
           scope: GMAIL_SCOPE,
-          login_hint: "maths.perriand@gmail.com", // Force la suggestion de ce mail exact
+          login_hint: GMAIL_SENDER,
           callback: (resp) => {
             clearTimeout(timer);
             if (settled) return;
@@ -90,14 +94,24 @@
             if (!settled) { settled = true; reject(new Error(err.type || "Autorisation refusée")); }
           }
         });
-        window.google?.accounts?.oauth2?.revoke(gmailAccessToken, () => {});
-client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmail.com" });
+        client.requestAccessToken({ prompt: "select_account" });
+      });
+    }
+
+    async function loadPdfLib() {
+      if (window.PDFLib) return window.PDFLib;
+      return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
+        s.onload = () => resolve(window.PDFLib);
+        s.onerror = reject;
+        document.head.appendChild(s);
       });
     }
 
     async function mergePdfs(pdfList) {
       if (pdfList.length === 1) return pdfList[0].b64;
-      const { PDFDocument } = window.PDFLib;
+      const { PDFDocument } = await loadPdfLib();
       const merged = await PDFDocument.create();
       for (const p of pdfList) {
         const bytes = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0));
@@ -107,6 +121,29 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       }
       const bytes = await merged.save();
       return uint8ToBase64(bytes);
+    }
+
+    // Fonction d'aide pour convertir un PDF Base64 en tableau d'images JPEG Base64 (pour Claude Vision)
+    async function convertPdfToImages(pdfBase64) {
+      const pdfData = atob(pdfBase64);
+      const loadingTask = pdfjsLib.getDocument({ data: pdfData });
+      const pdf = await loadingTask.promise;
+      const images = [];
+      
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 }); // Bonne résolution pour la lecture de texte
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+        // Extraction de l'image pure en base64 (sans le header mime-type)
+        const imgBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+        images.push(imgBase64);
+      }
+      return images;
     }
 
     function uint8ToBase64(bytes) {
@@ -207,33 +244,24 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       return "s_" + Date.now();
     }
 
-    /* ── API Google Gemini ── */
-    async function callGemini(apiKey, parts, systemInstruction = null, jsonMode = false) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      const body = {
-        contents: [{ parts: parts }]
-      };
-      
-      const generationConfig = {};
-      if (jsonMode) {
-        generationConfig.responseMimeType = "application/json";
-      }
-      if (Object.keys(generationConfig).length > 0) {
-        body.generationConfig = generationConfig;
-      }
-      
-      if (systemInstruction) {
-        body.systemInstruction = { parts: [{ text: systemInstruction }] };
-      }
-
-      const res = await fetch(url, {
+    /* ── API Claude (Correction des modèles et du format des requêtes Vision) ── */
+    async function callClaude(apiKey, messages, system) {
+      // CORRECTION : Utilisation du modèle officiel existant
+      const body = { model: "claude-3-5-sonnet-20241022", max_tokens: 4000, messages };
+      if (system) body.system = system;
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json", 
+          "x-api-key": apiKey, 
+          "anthropic-version": "2023-06-01", 
+          "anthropic-dangerous-direct-browser-access": "true" 
+        },
         body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      return data.content?.map(b => b.text || "").join("") || "";
     }
 
     function parseStudents(raw) {
@@ -277,6 +305,7 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       return '<p style="margin:6px 0">' + html + '</p>';
     }
 
+    /* ── Micro-composants ── */
     function Card({ children }) {
       return <div style={{ background:"#fff", border:"0.5px solid #e5e7eb", borderRadius:10, padding:"1.25rem", marginBottom:"1rem" }}>{children}</div>;
     }
@@ -297,7 +326,7 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       return <span style={{ fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:6, background:bg, color:tc }}>{children}</span>;
     }
 
-    /* ════ SessionManager ════ */
+    /* ════ APPLICATION ════ */
     function SessionManager({ onSelect }) {
       const [sessions, setSessions] = useState(() => getAllSessions());
       const [newName,  setNewName]  = useState("");
@@ -329,8 +358,8 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
 
       return (
         <div style={{ maxWidth:700, margin:"0 auto", padding:"2rem 1rem" }}>
-          <h1 style={{ marginBottom:8 }}>📐 Gestionnaire de devoirs (Gemini)</h1>
-          <p style={{ fontSize:13, color:"#6b7280", marginBottom:"1.5rem" }}>Chaque devoir est indépendant — ouvrez-en plusieurs dans des onglets différents.</p>
+          <h1 style={{ marginBottom:8 }}>📐 Gestionnaire de devoirs</h1>
+          <p style={{ fontSize:13, color:"#6b7280", marginBottom:"1.5rem" }}>Chaque devoir est indépendant — stocké localement.</p>
 
           {lastSession && (
             <div style={{ background:"#dbeafe", border:"0.5px solid #93c5fd", borderRadius:10, padding:"14px 16px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
@@ -371,7 +400,6 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
                     <div style={{ fontSize:11, color:"#9ca3af" }}>
                       {s.createdAt ? new Date(s.createdAt).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"}) : ""}
                       {s.step > 0 ? ` — Étape ${s.step+1}/4` : ""}
-                      {s.corrections?.length > 0 ? ` — ${s.corrections.filter(c=>!c.skipped).length} copie(s) corrigée(s)` : ""}
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:8, alignItems:"center" }}>
@@ -381,10 +409,6 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
                 </div>
               ))}
             </Card>
-          )}
-
-          {entries.length === 0 && (
-            <p style={{ textAlign:"center", color:"#9ca3af", fontSize:13, marginTop:"2rem" }}>Aucun devoir sauvegardé — créez-en un ci-dessus.</p>
           )}
         </div>
       );
@@ -405,14 +429,13 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       return <Devoir sessionId={sessionId} sessionName={sessionName} onBack={()=>{ setSessionId(null); setSessionName(""); }}/>;
     }
 
-    /* ── Devoir (logique principale) ── */
     function Devoir({ sessionId, sessionName, onBack }) {
       const load = (key, fallback) => { const s=getSession(sessionId); return s[key]!==undefined?s[key]:fallback; };
       const persist = (key, val) => {
         const s=getSession(sessionId); s[key]=val; saveSession(sessionId, {...getAllSessions()[sessionId],...s,[key]:val});
       };
 
-      const [apiKey,  setApiKey]  = useState(() => { try{return localStorage.getItem("prof_maths_gemini_apikey")||"";}catch{return "";} });
+      const [apiKey,  setApiKey]  = useState(() => { try{return localStorage.getItem("prof_maths_apikey")||"";}catch{return "";} });
       const [step,    setStepRaw] = useState(() => load("step", 0));
       const setStep = v => { setStepRaw(v); persist("step",v); };
       const [busy,    setBusy]    = useState(false);
@@ -420,7 +443,7 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       const [libsOk,  setLibsOk]  = useState({ h2c: !!window.html2canvas, jspdf: !!window.jspdf });
       const previewRef = useRef(null);
 
-      useEffect(()=>{ try{localStorage.setItem("prof_maths_gemini_apikey",apiKey);}catch{} },[apiKey]);
+      useEffect(()=>{ try{localStorage.setItem("prof_maths_apikey",apiKey);}catch{} },[apiKey]);
 
       /* Étape 0 */
       const [subjectMode,  setSubjectModeRaw]  = useState(() => load("subjectMode", "generate"));
@@ -440,19 +463,9 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       const setStudentsRaw = v => { setStudentsRawRaw(v); persist("studentsRaw",v); };
       const [extracting,    setExtracting]        = useState(false);
       const [copiesPdfs,    setCopiesPdfsRaw]     = useState([]);
-
-      const setCopiesPdfs = (v) => {
-        if (typeof v === 'function') {
-          setCopiesPdfsRaw(prev => {
-            const next = v(prev);
-            persist("copiesPdfsCount", next.length);
-            return next;
-          });
-        } else {
-          setCopiesPdfsRaw(v);
-          persist("copiesPdfsCount", v.length);
-        }
-      };
+      const setCopiesPdfs = v => setCopiesPdfsRaw(v);
+      const copiesPdf     = copiesPdfs.length > 0 ? copiesPdfs[0].b64 : null;
+      const copiesPdfName = copiesPdfs.map(p=>p.name).join(", ");
 
       /* Étape 2 */
       const [answers,     setAnswersRaw]     = useState(() => load("answers", {}));
@@ -464,40 +477,27 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       const [mailsDone,   setMailsDoneRaw]   = useState(() => load("mailsDone", false));
       const setMailsDone = v => { setMailsDoneRaw(v); persist("mailsDone",v); };
 
-      useEffect(()=>{
-        const check = () => setLibsOk({ h2c:!!window.html2canvas, jspdf:!!window.jspdf });
-        const t = setInterval(check, 500); return () => clearInterval(t);
-      },[]);
-
       const students    = parseStudents(studentsRaw);
-      const hasAnswers  = Object.values(answers).some(a => a && a.trim());
       const validCorrs  = corrections.filter(c=>!c.skipped);
       const avg         = validCorrs.filter(c=>!isNaN(+c.note)).reduce((a,c,_,arr)=>a+ +c.note/arr.length,0);
-      const copiesPdfName = copiesPdfs.map(p=>p.name).join(", ");
       const canNext     = [(subjectMode==="generate"?!!latexSrc:!!upSubPdf), true, corrections.length>0, true][step];
 
       const readPdf = (file, cb) => {
         const r = new FileReader(); r.onload = e => cb(e.target.result.split(",")[1]); r.readAsDataURL(file);
       };
-
+      
       const addCopiesPdf = (files) => {
         const arr = Array.from(files).filter(f=>f.type==="application/pdf");
         if (!arr.length) return;
-        
         let loaded = 0;
-        let firstB64 = null;
-        
         arr.forEach(file => {
           readPdf(file, b64 => {
-            if (loaded === 0) {
-              firstB64 = b64;
-            }
-            setCopiesPdfs(prev => [...prev, {name: file.name, b64}]);
-            loaded++;
-            
-            if (loaded === arr.length && firstB64) {
-              extractNames(firstB64);
-            }
+            setCopiesPdfs(prev => {
+              const next = [...prev, {name: file.name, b64}];
+              loaded++;
+              if (prev.length === 0 && loaded === 1) extractNames(b64);
+              return next;
+            });
           });
         });
       };
@@ -508,32 +508,45 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
         readPdf(file, b64 => setUpSubPdf(b64));
       };
 
+      // CORRECTION : Transformation des PDF en images de pages lues par Claude Vision
       const extractNames = async (b64) => {
-        if (!b64 || !apiKey) return;
+        if (!b64||!apiKey) return;
         setExtracting(true);
         try {
-          const parts = [
-            { inlineData: { mimeType: "application/pdf", data: b64 } },
-            { text: "Extrais le nom complet et l'email de chaque élève présent dans ces copies.\nRetourne uniquement un tableau JSON contenant des objets avec les clés 'name' et 'email'. Si aucun email n'est visible, laisse la chaîne vide \"\"." }
-          ];
-          const raw = await callGemini(apiKey, parts, "Tu extrais exclusivement des listes d'élèves. Réponds en JSON pur, sans formatage Markdown.", true);
-          const arr = JSON.parse(raw.trim());
-          if (Array.isArray(arr)) {
-            const formatted = arr.map(s => s.email ? `${s.name}, ${s.email}` : s.name).join("\n");
-            setStudentsRaw(formatted);
-          }
+          setStatus("Conversion du PDF pour analyse visuelle...");
+          const pageImages = await convertPdfToImages(b64);
+          
+          // Construction du bloc de contenu pour l'API Anthropic Multimodale
+          const contentBlocks = pageImages.slice(0, 5).map(img => ({
+            type: "image",
+            source: { type: "base64", media_type: "image/jpeg", data: img }
+          }));
+
+          contentBlocks.push({
+            type: "text", 
+            text: "Extrais le nom complet et l'email de chaque élève visible depuis ces copies.\nJSON uniquement sous la forme :\n[{\"name\":\"Prénom Nom\",\"email\":\"...\"}]\nSi l'email n'est pas présent, écris \"\"."
+          });
+
+          setStatus("Analyse par l'IA...");
+          const raw = await callClaude(apiKey, [{ role:"user", content: contentBlocks }], "Tu extrais des noms d'élèves. JSON uniquement sans balises markdown.");
+          const arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
+          setStudentsRaw(arr.map(s=>s.email?`${s.name}, ${s.email}`:s.name).join("\n"));
         } catch(e) { 
-          console.error("Erreur d'extraction :", e); 
+          console.error(e); 
+          alert("Erreur d'extraction : " + e.message);
         }
         setExtracting(false);
+        setStatus("");
       };
 
       const generateSubject = async () => {
         if (!consignes.trim()||!apiKey) return;
-        setBusy(true); setStatus("Génération du sujet avec Gemini…");
+        setBusy(true); setStatus("Génération du sujet en LaTeX…");
         try {
-          const parts = [{ text: `Génère un sujet de mathématiques en LaTeX selon ces consignes :\n${consignes}\n\nRetourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), puis la correction séparée par ---CORRECTION--- :\n\n\\begin{center}\n{\\Large\\textbf{Devoir de mathématiques}}\\\\[4pt]\n{\\normalsize [Niveau] \\hfill Durée : 1h}\n\\end{center}\n\\vspace{8pt}\n\\section*{Exercice 1 --- [titre] \\hfill (X points)}\n\\begin{enumerate}\n  \\item Énoncé avec $f(x) = ...$\n\\end{enumerate}\n\n---CORRECTION---\n\\section*{Corrigé exercice 1}\n...` }];
-          const res = await callGemini(apiKey, parts, "Tu es professeur de mathématiques au lycée français. LaTeX rigoureux pour toutes les formules.", false);
+          const res = await callClaude(apiKey, [{ role:"user", content:
+            `Génère un sujet de mathématiques en LaTeX selon ces consignes :\n${consignes}\n\nRetourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), puis la correction séparée par ---CORRECTION--- :\n\n\\begin{center}\n{\\Large\\textbf{Devoir de mathématiques}}\\\\[4pt]\n{\\normalsize [Niveau] \\hfill Durée : 1h}\n\\end{center}\n\\vspace{8pt}\n\\section*{Exercice 1 --- [titre] \\hfill (X points)}\n\\begin{enumerate}\n  \\item Énoncé avec $f(x) = ...$\n\\end{enumerate}\n\n---CORRECTION---\n\\section*{Corrigé exercice 1}\n...` }],
+            "Tu es professeur de mathématiques au lycée français. LaTeX rigoureux pour toutes les formules."
+          );
           const sep = res.indexOf("---CORRECTION---");
           setLatexSrc(sep>0?res.slice(0,sep).trim():res);
           setCorrRef(sep>0?res.slice(sep+16).trim():"");
@@ -565,30 +578,54 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
         setBusy(false);setStatus("");
       };
 
+      // CORRECTION : Refonte de la correction de PDF pour passer par la vision par page
       const correctFromPdf = async () => {
         if (!copiesPdfs.length||!apiKey) return;
-        setBusy(true);setStatus("Fusion des PDFs…");
+        setBusy(true); setStatus("Fusion et conversion des PDFs…");
         let mergedB64;
-        try { mergedB64 = await mergePdfs(copiesPdfs); }
-        catch(e) { setStatus("Erreur fusion PDF : "+e.message); setBusy(false); return; }
-        setStatus("Lecture et correction par Gemini…");
-        const studentList=students.map(s=>`- ${s.name}`).join("\n");
+        try { 
+          mergedB64 = await mergePdfs(copiesPdfs); 
+        } catch(e) { 
+          setStatus("Erreur fusion : "+e.message); setBusy(false); return; 
+        }
+
         try {
-          const parts = [];
-          if (subjectMode==="upload" && upSubPdf) {
-            parts.push({ inlineData: { mimeType: "application/pdf", data: upSubPdf } });
-          }
-          parts.push({ inlineData: { mimeType: "application/pdf", data: mergedB64 } });
-          parts.push({ text: `Copies des élèves :\n${studentList}\n\nSUJET${subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc}\n\nCORRIGÉ :\n${corrRef||"[utilise tes connaissances]"}\n\nIdentifie chaque copie, ses pages, corrige-la.\nIMPORTANT : dans l'appréciation et le conseil, tutoie l'élève (tu, ton, ta) et utilise son prénom seul.\nRetourne exclusivement un tableau JSON : [{"name":"Nom Prénom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"Lucas, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}]` });
+          setStatus("Transformation des copies en images pour l'IA...");
+          const pageImages = await convertPdfToImages(mergedB64);
           
-          const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Dans tes appréciations et conseils, tutoie toujours l'élève et utilise son prénom seul. Réponds uniquement en JSON pur.", true);
-          const arr = JSON.parse(raw.trim());
-          setCorrections(students.map(s=>{
-            const f=arr.find(r=>r.name?.toLowerCase().includes(s.name.split(" ")[0].toLowerCase()));
-            return f?{...s,...f}:{...s,skipped:true};
+          setStatus("Correction par Claude en cours (Analyse Vision)...");
+          const contentBlocks = [];
+          
+          // On ajoute le sujet si fourni au format PDF
+          if (subjectMode === "upload" && upSubPdf) {
+            const subjImages = await convertPdfToImages(upSubPdf);
+            subjImages.forEach(img => {
+              contentBlocks.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: img } });
+            });
+          }
+
+          // Ajout des images des copies
+          pageImages.forEach((img) => {
+            contentBlocks.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: img } });
+          });
+
+          const studentList = students.map(s=>`- ${s.name}`).join("\n");
+          contentBlocks.push({
+            type: "text",
+            text: `Voici les images des copies d'élèves à corriger.\n\nListe attendue des élèves :\n${studentList}\n\nSUJET :\n${latexSrc || "Voir premières pages du PDF"}\n\nCORRIGÉ DE RÉFÉRENCE :\n${corrRef||"Utilise tes connaissances d'expert"}\n\nIdentifie chaque copie d'élève, attribue une note globale cohérente sur 20, rédige des remarques détaillées et un conseil.\nIMPORTANT : tutoie l'élève dans l'appréciation.\nRenvoie UNIQUEMENT un tableau JSON valide (sans markdown) :\n[{"name":"Nom Prénom","note":14,"appreciation":"Lucas, tu as bien compris...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"Bonne démarche"}],"conseil":"Travaille tes formules"}]`
+          });
+
+          const raw = await callClaude(apiKey, [{ role: "user", content: contentBlocks }], "Tu es un correcteur de mathématiques. Réponds exclusivement en JSON valide, sans texte d'introduction ni balises de code.");
+          const arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
+          
+          setCorrections(students.map(s => {
+            const f = arr.find(r => r.name?.toLowerCase().includes(s.name.split(" ")[0].toLowerCase()));
+            return f ? { ...s, ...f } : { ...s, skipped: true };
           }));
-        } catch(e){setStatus("Erreur : "+e.message);}
-        setBusy(false);setStatus("");
+        } catch(e) { 
+          setStatus("Erreur : " + e.message); 
+        }
+        setBusy(false); setStatus("");
       };
 
       const correctAll = async () => {
@@ -599,9 +636,8 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
           if(!ans){results.push({...s,skipped:true});continue;}
           setStatus(`Correction de ${s.name}…`);
           try{
-            const parts = [{ text: `Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name} (prénom: ${s.name.split(" ")[0]}):\n${answers[s.id]}\nIMPORTANT : tutoie l'élève et utilise son prénom seul dans l'appréciation et le conseil.\nJSON uniquement:\n{"note":14,"appreciation":"${s.name.split(" ")[0]}, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}` }];
-            const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Réponds exclusivement en JSON.", true);
-            results.push({...s,...JSON.parse(raw.trim())});
+            const raw=await callClaude(apiKey,[{role:"user",content:`Corrige cette copie.\nSUJET:\n${latexSrc}\nCORRIGÉ:\n${corrRef||"[utilise tes connaissances]"}\nCOPIE DE ${s.name} :\n${answers[s.id]}\nIMPORTANT : tutoie l'élève.\nJSON uniquement:\n{"note":14,"appreciation":"${s.name.split(" ")[0]}, tu maîtrises...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}`}],"Tu es un correcteur de mathématiques. JSON uniquement sans texte autour.");
+            results.push({...s,...JSON.parse(raw.replace(/```json|```/g,"").trim())});
           }catch{results.push({...s,note:"?",appreciation:"Erreur.",details:[],conseil:""});}
         }
         setCorrections(results);setBusy(false);setStatus("");
@@ -612,17 +648,10 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
         const detHeaders = allDetails.map(d => `"${d.exercice} (obtenu/sur)","${d.exercice} (remarque)"`).join(",");
         const header = `"Nom","Note /20","Appréciation","Conseil",${detHeaders}`;
         const rows = validCorrs.map(c => {
-          const base = [
-            `"${c.name}"`,
-            `"${c.note}"`,
-            `"${(c.appreciation||"").replace(/"/g,"'")}"`,
-            `"${(c.conseil||"").replace(/"/g,"'")}"`
-          ].join(",");
+          const base = [`"${c.name}"`,`"${c.note}"`,`"${(c.appreciation||"").replace(/"/g,"'")}"`,`"${(c.conseil||"").replace(/"/g,"'")}"`].join(",");
           const detCells = allDetails.map((_,i) => {
             const d = c.details?.[i];
-            return d
-              ? `"${d.obtenu}/${d.sur}","${(d.remarque||"").replace(/"/g,"'")}"`
-              : `"",""`; 
+            return d ? `"${d.obtenu}/${d.sur}","${(d.remarque||"").replace(/"/g,"'")}"` : `"",""`; 
           }).join(",");
           return base + "," + detCells;
         });
@@ -662,10 +691,10 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
       const sendResults = async () => {
         setBusy(true);
         try {
-          setStatus("Connexion Gmail — choisissez maths.perriand@gmail.com…");
+          setStatus("Connexion Gmail…");
           await getGmailToken();
         } catch(e) {
-          setStatus("❌ " + (e.message || e) + " — Réessayez.");
+          setStatus("❌ " + (e.message || e));
           setBusy(false); return;
         }
         let errors = [];
@@ -674,63 +703,14 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
           setStatus(`Envoi à ${c.name}…`);
           const details=c.details?.map(d=>`• ${d.exercice} : ${d.obtenu}/${d.sur} — ${d.remarque}`).join("\n")||"";
           const prenom = c.name.split(" ")[0];
-          const appreciation = (c.appreciation||"").replace(/il\/elle/gi,"tu").replace(/l'élève/gi,"tu").replace(new RegExp(c.name,"gi"), prenom);
-          const conseil = (c.conseil||"").replace(/il\/elle/gi,"tu").replace(/l'élève/gi,"tu").replace(new RegExp(c.name,"gi"), prenom);
-          const body=`Bonjour ${prenom},\n\nVoici ton résultat pour ce devoir de mathématiques.\n\nNOTE : ${c.note}/20\n\nAppréciation :\n${appreciation}\n\nDétail :\n${details}\n\nConseil :\n${conseil}\n\nCordialement,\nF. Nocca`;
+          const body=`Bonjour ${prenom},\n\nVoici ton résultat pour ce devoir.\n\nNOTE : ${c.note}/20\n\nAppréciation :\n${c.appreciation}\n\nDétail :\n${details}\n\nConseil :\n${c.conseil}\n\nCordialement,\nF. Nocca`;
           const subject=`Résultats – ${sessionName}`;
-          let pdfB64=null, pdfFilename=null;
-
+          
           try {
-            setStatus(`Génération du corrigé pour ${prenom}…`);
-            const parts = [{ text: "Génère le corrigé détaillé pour " + prenom + " (note : " + c.note + "/20).\n" +
-              "SUJET :\n" + (latexSrc||"[sujet fourni en PDF]") + "\n\n" +
-              "DÉTAIL :\n" + (c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n") + "\n\n" +
-              "Retourne le corrigé en texte simple lisible. Pour les formules mathématiques, écris-les de façon lisible : f(x) = 2x+3, racine(2), x^2, etc.\n" +
-              "Structure : Exercice 1, question par question avec la solution complète." }];
-            
-            const corrTexte = await callGemini(apiKey, parts, "Tu es professeur de maths. Texte lisible, formules en notation simple.", false);
-
-            setStatus(`Mise en page PDF pour ${prenom}…`);
-            const {jsPDF} = window.jspdf;
-            const pdf = new jsPDF({orientation:"portrait", unit:"mm", format:"a4"});
-            const marg=15, pw=180, lh=5.5;
-            let y = marg;
-
-            const writeLine = (txt, opts={}) => {
-              if (!txt) return;
-              pdf.setFont("helvetica", opts.bold?"bold":"normal");
-              pdf.setFontSize(opts.size||10);
-              pdf.setTextColor(...(opts.color||[0,0,0]));
-              const lines = pdf.splitTextToSize(String(txt), pw);
-              lines.forEach(line => {
-                if (y > 280) { pdf.addPage(); y = marg; }
-                pdf.text(line, marg, y);
-                y += lh;
-              });
-              y += (opts.after||1);
-            };
-
-            writeLine(`Corrigé — ${prenom}`, {bold:true, size:14, after:3});
-            const nc = !isNaN(+c.note)?(+c.note>=10?[22,163,74]:[220,38,38]):[0,0,0];
-            writeLine(`Note : ${c.note}/20`, {bold:true, size:12, color:nc, after:3});
-            writeLine(appreciation, {size:10, color:[80,80,80], after:4});
-            pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
-            writeLine(corrTexte, {size:10, after:4});
-            pdf.setDrawColor(200,200,200); pdf.line(marg, y, marg+pw, y); y+=4;
-            writeLine("Conseil :", {bold:true, size:10, after:1});
-            writeLine(conseil, {size:10, color:[30,64,175], after:4});
-            writeLine("Cordialement, F. Nocca", {size:9, color:[100,100,100]});
-
-            const pdfArrayBuffer = pdf.output("arraybuffer");
-            pdfB64 = uint8ToBase64(new Uint8Array(pdfArrayBuffer));
-            pdfFilename = `corrige_${prenom}.pdf`;
-
-          } catch(e) { console.error("Erreur PDF corrigé:", e); }
-          try {
-            await sendGmail(c.email, subject, body, pdfB64, pdfFilename);
+            await sendGmail(c.email, subject, body);
           } catch(e) {
             errors.push(c.name);
-            console.error("Erreur envoi " + c.name, e);
+            console.error(e);
           }
         }
         setMailsDone(true); setBusy(false);
@@ -742,19 +722,17 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"1.5rem" }}>
             <div>
               <h1 style={{ fontSize:16, marginBottom:2 }}>📐 {sessionName}</h1>
-              <span style={{ fontSize:12, color:"#9ca3af", cursor:"pointer" }} onClick={onBack}>← Tous les devoirs</span>
+              <span style={{ fontSize:12, color:"#1d4ed8", cursor:"pointer" }} onClick={onBack}>← Tous les devoirs</span>
             </div>
-            <div style={{ fontSize:11, color:"#9ca3af" }}>💾 Sauvegarde automatique</div>
           </div>
 
           <Card>
-            <Field label="🔑 Clé API Google AI Studio (Gemini)">
-              <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="AIzaSy..." style={{ fontFamily:"monospace" }}/>
+            <Field label="🔑 Clé API Anthropic">
+              <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="sk-ant-api03-..." style={{ fontFamily:"monospace" }}/>
             </Field>
-            {!apiKey&&<p style={{ fontSize:12,color:"#dc2626",marginTop:6 }}>⚠️ Saisissez votre clé API Gemini pour activer l'outil.</p>}
-            {apiKey&&<p style={{ fontSize:12,color:"#16a34a",marginTop:6 }}>✓ Clé configurée avec succès.</p>}
           </Card>
 
+          {/* Stepper */}
           <div style={{ display:"flex", alignItems:"flex-start", marginBottom:"2rem" }}>
             {STEPS.map((label,i)=>{
               const done=i<step,active=i===step;
@@ -777,252 +755,97 @@ client.requestAccessToken({ prompt: "select_account", hint: "maths.perriand@gmai
             })}
           </div>
 
+          {/* STEP 0 */}
           {step===0&&(<>
             <div style={{ display:"flex",gap:8,marginBottom:16 }}>
-              {[["generate","✨ Générer avec l'IA"],["upload","📂 J'ai déjà un sujet (PDF)"]].map(([mode,lbl])=>(
+              {[["generate","✨ IA"],["upload","📂 PDF"]].map(([mode,lbl])=>(
                 <button key={mode} onClick={()=>setSubjectMode(mode)} style={{
-                  flex:1,padding:"10px 0",fontSize:13,fontWeight:500,
-                  background:subjectMode===mode?"#1d4ed8":"#f3f4f6",
-                  color:subjectMode===mode?"#fff":"#6b7280",
-                  border:subjectMode===mode?"none":"0.5px solid #e5e7eb",borderRadius:8,
+                  flex:1,padding:"10px 0",fontSize:13,
+                  background:subjectMode===mode?"#1d4ed8":"#f3f4f6",color:subjectMode===mode?"#fff":"#6b7280"
                 }}>{lbl}</button>
               ))}
             </div>
             {subjectMode==="generate"&&(<>
               <Card>
-                <Field label="Vos consignes pour le sujet">
-                  <textarea value={consignes} onChange={e=>setConsignes(e.target.value)}
-                    placeholder="Ex : Devoir de Terminale sur les suites, 3 exercices progressifs…"
-                    style={{ minHeight:130,lineHeight:1.6 }}/>
-                </Field>
+                <textarea value={consignes} onChange={e=>setConsignes(e.target.value)} placeholder="Consignes..." style={{ minHeight:100 }}/>
                 <button disabled={busy||!consignes.trim()||!apiKey} onClick={generateSubject} style={{ width:"100%",marginTop:8 }}>
                   {busy?status:"✨ Générer le sujet"}
                 </button>
               </Card>
-              {latexSrc&&(<>
-                <Card>
-                  <SectionHead title="Aperçu du sujet"/>
-                  <div ref={previewRef} style={{ background:"#fff",color:"#111",padding:"28px 32px",border:"0.5px solid #e5e7eb",borderRadius:6,lineHeight:1.8,fontSize:13 }}
-                    dangerouslySetInnerHTML={{ __html:latexToHtml(latexSrc) }}/>
-                </Card>
-                <Card>
-                  <SectionHead title="Source LaTeX — modifiable"/>
-                  <textarea value={latexSrc} onChange={e=>setLatexSrc(e.target.value)} style={{ minHeight:180,fontFamily:"monospace",fontSize:11.5 }}/>
-                </Card>
-              </>)}
+              {latexSrc&&<Card><div ref={previewRef} dangerouslySetInnerHTML={{ __html:latexToHtml(latexSrc) }}/></Card>}
             </>)}
             {subjectMode==="upload"&&(
               <Card>
-                <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>Votre sujet en PDF</div>
-                <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();handleSubjectPdf(e.dataTransfer.files[0]);}}
-                  onClick={()=>document.getElementById("subj-pdf").click()}
-                  style={{ border:"1.5px dashed #d1d5db",borderRadius:8,padding:"2rem",textAlign:"center",cursor:"pointer",background:upSubPdf?"#f0fdf4":"#f9fafb" }}>
-                  <input id="subj-pdf" type="file" accept="application/pdf" style={{ display:"none" }} onChange={e=>handleSubjectPdf(e.target.files[0])}/>
-                  {upSubPdf?<span style={{ color:"#16a34a",fontWeight:500 }}>✓ {upSubPdfName}</span>:<span style={{ color:"#6b7280",fontSize:13 }}>Glissez le PDF ici ou cliquez</span>}
-                </div>
+                <input type="file" accept="application/pdf" onChange={e=>handleSubjectPdf(e.target.files[0])}/>
+                {upSubPdfName && <p style={{marginTop: 8, color: "green"}}>✓ {upSubPdfName}</p>}
               </Card>
             )}
           </>)}
 
+          {/* STEP 1 */}
           {step===1&&(<>
-            {subjectMode==="generate"&&(
-              <Card>
-                <p style={{ fontSize:13,color:"#6b7280",marginBottom:12 }}>Téléchargez le PDF du sujet pour le déposer dans Pronote.</p>
-                <button disabled={busy||!libsOk.h2c||!libsOk.jspdf} onClick={downloadSubjectPdf} style={{ width:"100%" }}>
-                  {busy?status:"📥 Télécharger le sujet en PDF"}
-                </button>
-                {(!libsOk.h2c||!libsOk.jspdf)&&<p style={{ fontSize:11,color:"#9ca3af",marginTop:6,textAlign:"center" }}>Chargement des librairies…</p>}
-              </Card>
-            )}
-            {subjectMode==="upload"&&(
-              <Card>
-                <div style={{ display:"flex",alignItems:"center",gap:10 }}>
-                  <span style={{ fontSize:20 }}>✓</span>
-                  <div>
-                    <div style={{ fontSize:14,fontWeight:500 }}>Sujet chargé : {upSubPdfName}</div>
-                    <div style={{ fontSize:12,color:"#6b7280" }}>Utilisé par l'IA à l'étape Correction.</div>
-                  </div>
-                </div>
-              </Card>
-            )}
-            {subjectMode==="generate"&&latexSrc&&(
-              <Card>
-                <SectionHead title="Aperçu"/>
-                <div style={{ background:"#fff",color:"#111",padding:"24px 28px",border:"0.5px solid #e5e7eb",borderRadius:6,lineHeight:1.8,fontSize:13 }}
-                  dangerouslySetInnerHTML={{ __html:latexToHtml(latexSrc) }}/>
-              </Card>
-            )}
+            {subjectMode==="generate"&&<Card><button onClick={downloadSubjectPdf}>📥 Télécharger le sujet PDF</button></Card>}
             <Card>
-              <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>👥 Liste des élèves</div>
-              <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();addCopiesPdf(e.dataTransfer.files);}}
-                onClick={()=>document.getElementById("copies-pdf").click()}
-                style={{ border:"1.5px dashed #d1d5db",borderRadius:8,padding:"1rem",textAlign:"center",cursor:"pointer",marginBottom:10,background:copiesPdfs.length?"#f0fdf4":"#f9fafb" }}>
-                <input id="copies-pdf" type="file" accept="application/pdf" multiple style={{ display:"none" }} onChange={e=>{if(e.target.files.length)addCopiesPdf(e.target.files);}}/>
-                {copiesPdfs.length>0
-                  ?<span style={{ color:"#16a34a",fontWeight:500 }}>✓ {copiesPdfs.length} fichier{copiesPdfs.length>1?"s":""} — {copiesPdfName}</span>
-                  :<span style={{ color:"#6b7280",fontSize:13 }}>📄 Déposez le(s) PDF des copies pour extraire les noms<br/><span style={{ fontSize:11 }}>(réutilisé à l'étape Correction)</span></span>}
-              </div>
-              {extracting&&<p style={{ fontSize:12,color:"#1d4ed8",marginBottom:8,textAlign:"center" }}>🔍 Extraction des noms en cours…</p>}
-              <Field label={copiesPdfs.length>0?"Noms extraits — vérifiez et complétez les emails":"Ou saisissez manuellement — Nom Prénom, email"}>
-                <textarea value={studentsRaw} onChange={e=>setStudentsRaw(e.target.value)}
-                  placeholder={"Marie Dupont, marie.dupont@lycee.fr\nPaul Martin, paul.martin@lycee.fr"}
-                  style={{ minHeight:100,fontFamily:"monospace",fontSize:12 }}/>
-              </Field>
+              <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>👥 Copies des élèves (PDF)</div>
+              <input type="file" accept="application/pdf" multiple onChange={e=>addCopiesPdf(e.target.files)}/>
+              {extracting && <p style={{color: "blue", marginTop: 8}}>{status}</p>}
+              <textarea value={studentsRaw} onChange={e=>setStudentsRaw(e.target.value)} placeholder="Noms des élèves (un par ligne)..." style={{ minHeight:100, marginTop:10 }}/>
             </Card>
           </>)}
 
+          {/* STEP 2 */}
           {step===2&&(<>
             {corrections.length===0&&(
               <Card>
-                <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>📄 Copies à corriger</div>
-
-                <div onDragOver={e=>e.preventDefault()}
-                  onDrop={e=>{e.preventDefault();addCopiesPdf(e.dataTransfer.files);}}
-                  onClick={()=>document.getElementById("copies-pdf2").click()}
-                  style={{ border:"1.5px dashed #d1d5db",borderRadius:8,padding:"1.5rem",textAlign:"center",cursor:"pointer",marginBottom:10,background:copiesPdfs.length?"#f0fdf4":"#f9fafb" }}>
-                  <input id="copies-pdf2" type="file" accept="application/pdf" multiple style={{ display:"none" }}
-                    onChange={e=>addCopiesPdf(e.target.files)}/>
-                  {copiesPdfs.length===0
-                    ? <span style={{ color:"#6b7280",fontSize:13 }}>Glissez un ou plusieurs PDFs ici ou cliquez</span>
-                    : <span style={{ color:"#16a34a",fontSize:13 }}>✓ {copiesPdfs.length} fichier{copiesPdfs.length>1?"s":""} chargé{copiesPdfs.length>1?"s":""}</span>
-                  }
-                </div>
-
-                {copiesPdfs.length>0&&(
-                  <div style={{ marginBottom:10 }}>
-                    {copiesPdfs.map((p,i)=>(
-                      <div key={i} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"4px 8px",background:"#f3f4f6",borderRadius:6,marginBottom:4 }}>
-                        <span>📄 {p.name}</span>
-                        <span style={{ color:"#dc2626",cursor:"pointer",padding:"0 4px" }}
-                          onClick={()=>setCopiesPdfs(prev=>prev.filter((_,j)=>j!==i))}>✕</span>
-                      </div>
-                    ))}
-                    <button onClick={()=>document.getElementById("copies-pdf-add").click()}
-                      style={{ width:"100%",background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db",fontSize:12,marginTop:4 }}>
-                      ➕ Ajouter un PDF (copie en retard…)
-                    </button>
-                    <input id="copies-pdf-add" type="file" accept="application/pdf" multiple style={{ display:"none" }}
-                      onChange={e=>addCopiesPdf(e.target.files)}/>
-                  </div>
-                )}
-
-                {copiesPdfs.length>0&&<button disabled={busy||!apiKey} onClick={correctFromPdf} style={{ width:"100%",marginBottom:8 }}>{busy?status:"🤖 Corriger depuis les PDFs avec Gemini ↗"}</button>}
-                <div style={{ textAlign:"center",fontSize:12,color:"#9ca3af",margin:"10px 0 6px" }}>— ou saisir manuellement —</div>
+                <div style={{ fontSize:14,fontWeight:500,marginBottom:10 }}>✏️ Lancer la correction</div>
+                <button disabled={busy||!apiKey} onClick={correctFromPdf} style={{ width:"100%" }}>
+                  {busy ? status : "🤖 Lancer la correction automatique des PDF ↗"}
+                </button>
+                <p style={{ textAlign: "center", margin: "10px 0", fontSize: 12, color: "#aaa" }}>OU</p>
                 {students.map(s=>(
-                  <Card key={s.id}>
-                    <SectionHead title={s.name}/>
-                    <Field label="Réponses de l'élève">
-                      <textarea value={answers[s.id]||""} onChange={e=>setAnswers({...answers,[s.id]:e.target.value})}
-                        placeholder="Saisissez ou résumez les réponses…" style={{ minHeight:80,fontFamily:"monospace",fontSize:12 }}/>
-                    </Field>
-                  </Card>
+                  <div key={s.id} style={{marginBottom: 8}}>
+                    <span style={{fontSize: 12, fontWeight: "bold"}}>{s.name}</span>
+                    <textarea value={answers[s.id]||""} onChange={e=>setAnswers({...answers,[s.id]:e.target.value})} placeholder="Saisir la copie manuellement..." style={{ minHeight:60 }}/>
+                  </div>
                 ))}
-                {hasAnswers&&<button disabled={busy||!apiKey} onClick={correctAll} style={{ width:"100%" }}>{busy?status:"🤖 Corriger toutes les copies ↗"}</button>}
+                <button disabled={busy||!apiKey} onClick={correctAll} style={{ width:"100%", marginTop: 10 }}>Correction des saisies manuelles</button>
               </Card>
             )}
-            {corrections.length>0&&(<>
-              {students.map(s=>{
-                const c=corrections.find(x=>x.id===s.id);
-                const nc=c&&!isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#111";
-                return (
-                  <Card key={s.id}>
-                    <SectionHead title={s.name} right={c&&!c.skipped
-                      ?<div style={{ display:"flex",alignItems:"center",gap:8 }}>
-                          {c.pageStart&&<Bdg color="info">p.{c.pageStart}–{c.pageEnd}</Bdg>}
-                          <span style={{ fontSize:22,fontWeight:500,color:nc }}>{c.note}<span style={{ fontSize:14,color:"#6b7280" }}>/20</span></span>
-                        </div>:null}/>
-                    {c&&!c.skipped?(<>
-                      <p style={{ fontSize:13,color:"#6b7280",margin:"0 0 8px" }}>{c.appreciation}</p>
-                      {c.details?.map((d,i)=>(
-                        <div key={i} style={{ display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0",borderTop:"0.5px solid #e5e7eb" }}>
-                          <span style={{ color:"#6b7280" }}>{d.exercice}</span>
-                          <span style={{ fontWeight:500 }}>{d.obtenu}/{d.sur} — {d.remarque}</span>
-                        </div>
-                      ))}
-                      <p style={{ fontSize:12,color:"#6b7280",fontStyle:"italic",margin:"8px 0 0" }}>💡 {c.conseil}</p>
-                    </>):<p style={{ fontSize:13,color:"#9ca3af",fontStyle:"italic" }}>Copie non trouvée dans le PDF</p>}
+            {corrections.length>0&&(
+              <div>
+                {corrections.map(c=>(
+                  <Card key={c.id}>
+                    <SectionHead title={c.name} right={<span>{c.note}/20</span>}/>
+                    <p style={{fontSize: 13, color: "#555"}}>{c.appreciation}</p>
+                    <p style={{fontSize: 12, color: "#1d4ed8", fontStyle: "italic", marginTop: 5}}>💡 {c.conseil}</p>
                   </Card>
-                );
-              })}
-              <div style={{ display:"flex",gap:8,marginTop:4 }}>
-                <button onClick={()=>setCorrections([])} style={{ flex:1,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db" }}>↩ Recommencer</button>
-                <button disabled={busy||!apiKey} onClick={()=>document.getElementById("late-pdf").click()}
-                  style={{ flex:1,background:"#f3f4f6",color:"#1d4ed8",border:"0.5px solid #bfdbfe",fontSize:12 }}>
-                  ➕ Copie en retard
-                </button>
-                <input id="late-pdf" type="file" accept="application/pdf" style={{ display:"none" }} onChange={async e=>{
-                  const f=e.target.files[0]; if(!f)return;
-                  setBusy(true); setStatus(`Correction de ${f.name}…`);
-                  readPdf(f, async b64 => {
-                    setCopiesPdfs(prev=>[...prev,{name:f.name,b64}]);
-                    try {
-                      const parts = [];
-                      if (subjectMode==="upload" && upSubPdf) {
-                        parts.push({ inlineData: { mimeType: "application/pdf", data: upSubPdf } });
-                      }
-                      parts.push({ inlineData: { mimeType: "application/pdf", data: b64 } });
-                      parts.push({ text: "Corrige cette copie en retard (PDF joint).\nSUJET"+(subjectMode==="upload"?" (voir PDF joint)":":\n"+latexSrc)+"\nCORRIGÉ :\n"+(corrRef||"[utilise tes connaissances]")+"\nRetourne uniquement un tableau JSON contenant un objet représentant la copie : [{\"name\":\"Nom Prénom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]" });
-                      
-                      const raw = await callGemini(apiKey, parts, "Tu es correcteur de mathématiques bienveillant. Réponds uniquement en JSON pur.", true);
-                      const arr = JSON.parse(raw.trim());
-                      if(arr.length>0){
-                        const newC=arr[0];
-                        const existingStudent=students.find(s=>s.name.toLowerCase().includes(newC.name?.split(" ")[0]?.toLowerCase()));
-                        setCorrections(prev=>[...prev,{...(existingStudent||{id:Date.now(),name:newC.name,email:""}),...newC}]);
-                      }
-                    } catch(err){console.error(err);}
-                    setBusy(false);setStatus("");
-                  });
-                }}/>
+                ))}
+                <button onClick={()=>setCorrections([])}>↩ Recommencer</button>
               </div>
-            </>)}
+            )}
           </>)}
 
+          {/* STEP 3 */}
           {step===3&&(
             <Card>
               <div style={{ display:"flex",gap:8,marginBottom:16 }}>
-                <button onClick={exportCsv} style={{ flex:1,fontSize:12,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db" }}>📊 CSV</button>
-                <button onClick={exportPdfRecap} disabled={!libsOk.jspdf} style={{ flex:1,fontSize:12,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db" }}>📄 PDF récap</button>
+                <button onClick={exportCsv} style={{ flex:1 }}>📊 Exporter CSV (Pronote)</button>
+                <button onClick={exportPdfRecap} style={{ flex:1 }}>📄 PDF Récapitulatif</button>
               </div>
-              <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:12,marginBottom:16 }}>
-                {validCorrs.map(c=>{
-                  const nc=!isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#6b7280";
-                  return (
-                    <div key={c.id} style={{ background:"#f3f4f6",borderRadius:8,padding:14,textAlign:"center" }}>
-                      <div style={{ fontSize:11,color:"#6b7280",marginBottom:4 }}>{c.name}</div>
-                      <div style={{ fontSize:26,fontWeight:500,color:nc }}>{c.note}<span style={{ fontSize:14,color:"#6b7280" }}>/20</span></div>
-                    </div>
-                  );
-                })}
+              <div style={{ padding: "10px 0", borderTop: "0.5px solid #ccc", display: "flex", justifyContent: "space-between" }}>
+                <span>Moyenne de classe :</span>
+                <span style={{ fontWeight: "bold" }}>{validCorrs.length>0?avg.toFixed(1):"—"}/20</span>
               </div>
-              <div style={{ display:"flex",justifyContent:"space-between",padding:"10px 0",borderTop:"0.5px solid #e5e7eb" }}>
-                <span style={{ fontSize:13,color:"#6b7280" }}>Moyenne de classe</span>
-                <span style={{ fontSize:18,fontWeight:500 }}>{validCorrs.length>0?avg.toFixed(1):"—"}/20</span>
-              </div>
-
-              <div style={{ background:"#f0fdf4",border:"0.5px solid #86efac",borderRadius:8,padding:"10px 12px",margin:"12px 0",fontSize:12,color:"#166534" }}>
-                ✉️ Les mails seront envoyés automatiquement depuis <strong>maths.perriand@gmail.com</strong>.<br/>
-                Un écran Google s'ouvrira la première fois pour confirmer l'autorisation.
-              </div>
-              {mailsDone
-                ?<div style={{ textAlign:"center",padding:"1.5rem" }}>
-                    <div style={{ fontSize:28,marginBottom:8 }}>✅</div>
-                    <span style={{ fontWeight:500,color:"#16a34a" }}>Mails envoyés à tous les élèves !</span>
-                  </div>
-                :<button disabled={busy} onClick={sendResults} style={{ width:"100%",marginTop:8 }}>
-                    {busy?status:"📬 Préparer et envoyer les résultats"}
-                  </button>
-              }
+              {mailsDone ? <p style={{color: "green", textAlign:"center"}}>Mails envoyés !</p> : <button disabled={busy} onClick={sendResults} style={{ width:"100%", marginTop: 10 }}>📬 Envoyer par Gmail</button>}
+              {busy && <p style={{fontSize:12, color:"blue", marginTop:5}}>{status}</p>}
             </Card>
           )}
 
+          {/* Nav Footer */}
           <div style={{ display:"flex",justifyContent:"space-between",marginTop:"1.5rem" }}>
-            {step>0?<button style={{ background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db" }} disabled={busy} onClick={()=>setStep(step-1)}>← Retour</button>:<div/>}
-            {step<3&&<button disabled={!canNext||busy||!apiKey} onClick={()=>setStep(step+1)}>
-              {["Diffuser →","Corriger les copies →","Voir les résultats →"][step]}
-            </button>}
+            {step>0?<button disabled={busy} onClick={()=>setStep(step-1)}>← Retour</button>:<div/>}
+            {step<3&&<button disabled={!canNext||busy||!apiKey} onClick={()=>setStep(step+1)}>Suivant →</button>}
           </div>
-          <p style={{ textAlign:"center",fontSize:11,color:"#9ca3af",marginTop:"2rem" }}>Propulsé par Google Gemini</p>
         </div>
       );
     }
