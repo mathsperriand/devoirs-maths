@@ -747,27 +747,7 @@
             pdfB64 = uint8ToBase64(new Uint8Array(pdfArrayBuffer));
             pdfFilename = `corrige_${prenom}.pdf`;
 
-            // Si les copies sont disponibles, tenter la fusion
-            const mergedForSend = copiesPdfs.length>1
-              ? await mergePdfs(copiesPdfs).catch(()=>null)
-              : (copiesPdfs[0]?.b64||null);
-            if(mergedForSend && c.pageStart && c.pageEnd){
-              try {
-                setStatus(`Assemblage copie + corrigé pour ${prenom}…`);
-                const copiePdf = await extractPdfPages(mergedForSend, c.pageStart, c.pageEnd);
-                const {PDFDocument} = await loadPdfLib();
-                const merged = await PDFDocument.create();
-                const copieDoc = await PDFDocument.load(Uint8Array.from(atob(copiePdf), ch=>ch.charCodeAt(0)));
-                const corrDoc2 = await PDFDocument.load(Uint8Array.from(atob(pdfB64), ch=>ch.charCodeAt(0)));
-                const cp = await merged.copyPages(copieDoc, copieDoc.getPageIndices());
-                cp.forEach(p=>merged.addPage(p));
-                const cr = await merged.copyPages(corrDoc2, corrDoc2.getPageIndices());
-                cr.forEach(p=>merged.addPage(p));
-                const mb = await merged.save();
-                pdfB64 = uint8ToBase64(mb);
-                pdfFilename = `copie_corrigee_${prenom}.pdf`;
-              } catch(e2) { console.warn("Fusion échouée, corrigé seul envoyé:", e2); }
-            }
+            // Corrigé seul en pièce jointe (fusion avec copie désactivée pour stabilité)
           } catch(e) { console.error("Erreur PDF corrigé:", e); }
           try {
             await sendGmail(c.email, subject, body, pdfB64, pdfFilename);
@@ -1049,15 +1029,7 @@
                 <span style={{ fontSize:13,color:"#6b7280" }}>Moyenne de classe</span>
                 <span style={{ fontSize:18,fontWeight:500 }}>{validCorrs.length>0?avg.toFixed(1):"—"}/20</span>
               </div>
-              {hasPdfPages&&(
-                <div style={{ display:"flex",alignItems:"center",gap:10,padding:"12px 0",borderTop:"0.5px solid #e5e7eb" }}>
-                  <input type="checkbox" id="chk-pdf" checked={withPdfCopy} onChange={e=>setWithPdfCopy(e.target.checked)} style={{ width:16,height:16 }}/>
-                  <label htmlFor="chk-pdf" style={{ fontSize:13,cursor:"pointer" }}>
-                    📎 Joindre la copie PDF découpée dans le mail
-                    <span style={{ display:"block",fontSize:11,color:"#6b7280" }}>Chaque élève reçoit ses propres pages en pièce jointe</span>
-                  </label>
-                </div>
-              )}
+
               <div style={{ background:"#f0fdf4",border:"0.5px solid #86efac",borderRadius:8,padding:"10px 12px",margin:"12px 0",fontSize:12,color:"#166534" }}>
                 ✉️ Les mails seront envoyés automatiquement depuis <strong>maths.perriand@gmail.com</strong>.<br/>
                 Un écran Google s'ouvrira la première fois pour confirmer l'autorisation.
