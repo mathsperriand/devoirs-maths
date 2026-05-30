@@ -68,22 +68,29 @@
         if (!window.google?.accounts?.oauth2) {
           reject(new Error("Google Identity Services non chargé")); return;
         }
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) { settled = true; reject(new Error("Délai dépassé — réessayez")); }
+        }, 120000);
         const client = window.google.accounts.oauth2.initTokenClient({
           client_id: GMAIL_CLIENT_ID,
           scope: GMAIL_SCOPE,
           login_hint: GMAIL_SENDER,
-          prompt: "consent",
           callback: (resp) => {
+            clearTimeout(timer);
+            if (settled) return;
+            settled = true;
             if (resp.error) { reject(new Error(resp.error)); return; }
             gmailAccessToken = resp.access_token;
             setTimeout(() => { gmailAccessToken = null; }, (resp.expires_in - 60) * 1000);
             resolve(gmailAccessToken);
           },
           error_callback: (err) => {
-            reject(new Error(err.type || "Autorisation refusée"));
+            clearTimeout(timer);
+            if (!settled) { settled = true; reject(new Error(err.type || "Autorisation refusée")); }
           }
         });
-        client.requestAccessToken();
+        client.requestAccessToken({ prompt: "select_account" });
       });
     }
 
@@ -111,7 +118,17 @@
         pages.forEach(pg => merged.addPage(pg));
       }
       const bytes = await merged.save();
-      return btoa(String.fromCharCode(...bytes));
+      return uint8ToBase64(bytes);
+    }
+
+    // Convertit Uint8Array → base64 sans stack overflow (chunked)
+    function uint8ToBase64(bytes) {
+      let binary = "";
+      const chunkSize = 8192;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary);
     }
 
     // Encode en base64url
@@ -239,7 +256,7 @@
       const copied = await newDoc.copyPages(srcDoc, idx);
       copied.forEach(p => newDoc.addPage(p));
       const bytes = await newDoc.save();
-      return btoa(String.fromCharCode(...bytes));
+      return uint8ToBase64(bytes);
     }
 
     /* ── LaTeX → HTML ── */
@@ -597,14 +614,31 @@
       };
 
       const exportCsv = () => {
-        const header="Nom,Note /20,Appréciation,Conseil,"+(validCorrs[0]?.details?.map(d=>d.exercice).join(","))||"";
-        const rows=validCorrs.map(c=>{
-          const det=c.details?.map(d=>`${d.obtenu}/${d.sur}`).join(",")||"";
-          return `"${c.name}","${c.note}","${(c.appreciation||"").replace(/"/g,"'")}","${(c.conseil||"").replace(/"/g,"'")}","${det}"`;
+        const allDetails = validCorrs[0]?.details || [];
+        // En-tête : colonnes fixes + une colonne par exercice (note + remarque)
+        const detHeaders = allDetails.map(d => `"${d.exercice} (obtenu/sur)","${d.exercice} (remarque)"`).join(",");
+        const header = `"Nom","Note /20","Appréciation","Conseil",${detHeaders}`;
+        const rows = validCorrs.map(c => {
+          const base = [
+            `"${c.name}"`,
+            `"${c.note}"`,
+            `"${(c.appreciation||"").replace(/"/g,"'")}"`,
+            `"${(c.conseil||"").replace(/"/g,"'")}"`
+          ].join(",");
+          const detCells = allDetails.map((_,i) => {
+            const d = c.details?.[i];
+            return d
+              ? `"${d.obtenu}/${d.sur}","${(d.remarque||"").replace(/"/g,"'")}"`
+              : `"",""`; 
+          }).join(",");
+          return base + "," + detCells;
         });
-        const a=document.createElement("a");
-        a.href="data:text/csv;charset=utf-8,"+encodeURIComponent([header,...rows].join("\n"));
-        a.download=`corrections_${sessionName.replace(/[^a-z0-9]/gi,"_")}.csv`;a.click();
+        // BOM UTF-8 pour Excel
+        const bom = "\uFEFF";
+        const a = document.createElement("a");
+        a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(bom + [header,...rows].join("\n"));
+        a.download = `corrections_${sessionName.replace(/[^a-z0-9]/gi,"_")}.csv`;
+        a.click();
       };
 
       const exportPdfRecap = () => {
@@ -709,7 +743,8 @@
             writeLine(conseil, {size:10, color:[30,64,175], after:4});
             writeLine("Cordialement, F. Nocca", {size:9, color:[100,100,100]});
 
-            pdfB64 = pdf.output("datauristring").split(",")[1];
+            const pdfArrayBuffer = pdf.output("arraybuffer");
+            pdfB64 = uint8ToBase64(new Uint8Array(pdfArrayBuffer));
             pdfFilename = `corrige_${prenom}.pdf`;
 
             // Si les copies sont disponibles, tenter la fusion
@@ -729,7 +764,7 @@
                 const cr = await merged.copyPages(corrDoc2, corrDoc2.getPageIndices());
                 cr.forEach(p=>merged.addPage(p));
                 const mb = await merged.save();
-                pdfB64 = btoa(String.fromCharCode(...mb));
+                pdfB64 = uint8ToBase64(mb);
                 pdfFilename = `copie_corrigee_${prenom}.pdf`;
               } catch(e2) { console.warn("Fusion échouée, corrigé seul envoyé:", e2); }
             }
@@ -1018,8 +1053,8 @@
                 <div style={{ display:"flex",alignItems:"center",gap:10,padding:"12px 0",borderTop:"0.5px solid #e5e7eb" }}>
                   <input type="checkbox" id="chk-pdf" checked={withPdfCopy} onChange={e=>setWithPdfCopy(e.target.checked)} style={{ width:16,height:16 }}/>
                   <label htmlFor="chk-pdf" style={{ fontSize:13,cursor:"pointer" }}>
-                    📎 Télécharger la copie découpée avant chaque mail
-                    <span style={{ display:"block",fontSize:11,color:"#6b7280" }}>Chaque PDF sera téléchargé puis votre client mail s'ouvrira</span>
+                    📎 Joindre la copie PDF découpée dans le mail
+                    <span style={{ display:"block",fontSize:11,color:"#6b7280" }}>Chaque élève reçoit ses propres pages en pièce jointe</span>
                   </label>
                 </div>
               )}
@@ -1030,7 +1065,7 @@
               {mailsDone
                 ?<div style={{ textAlign:"center",padding:"1.5rem" }}>
                     <div style={{ fontSize:28,marginBottom:8 }}>✅</div>
-                    <span style={{ fontWeight:500,color:"#16a34a" }}>Mails préparés pour tous les élèves !</span>
+                    <span style={{ fontWeight:500,color:"#16a34a" }}>Mails envoyés à tous les élèves !</span>
                   </div>
                 :<button disabled={busy} onClick={sendResults} style={{ width:"100%",marginTop:8 }}>
                     {busy?status:"📬 Préparer et envoyer les résultats"}
