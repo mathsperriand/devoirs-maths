@@ -87,7 +87,43 @@ function buildMimeWithPdf(to, subj, body, pdfB64, filename) {
   ].join("\r\n"));
 }
 
-async function sendGmail(to, subj, body, pdfB64=null, filename=null) {
+function buildHtmlMime(to, subj, htmlBody) {
+      const katexCss = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css";
+      const fullHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"/>'
+        + '<link rel="stylesheet" href="'+katexCss+'"/>'
+        + '<style>body{font-family:Georgia,serif;max-width:620px;margin:0 auto;padding:24px;color:#111;line-height:1.7;font-size:13pt}'
+        + 'h1{font-size:15pt;border-bottom:1px solid #ccc;padding-bottom:8px;margin-bottom:16px}'
+        + 'h2{font-size:13pt;margin-top:20px;margin-bottom:6px}'
+        + '.note{font-size:14pt;font-weight:bold}'
+        + '.appreciation{color:#555;font-style:italic;margin-bottom:16px}'
+        + '.detail{border-top:1px solid #e5e7eb;padding:6px 0;font-size:11pt}'
+        + '.exercice{color:#555}'
+        + '.conseil{background:#eff6ff;border-left:3px solid #3b82f6;padding:12px 16px;margin-top:20px;border-radius:4px;font-size:11pt;color:#1e40af}'
+        + '.signature{margin-top:24px;color:#555;font-size:11pt}'
+        + 'ol,ul{padding-left:24px}li{margin:4px 0}'
+        + '.math-block{margin:10px 0;text-align:center}'
+        + '</style></head><body>' + htmlBody + '</body></html>';
+      return b64url([
+        'From: '+GMAIL_SENDER, 'To: '+to,
+        'Subject: =?UTF-8?B?'+btoa(unescape(encodeURIComponent(subj)))+'?=',
+        'MIME-Version: 1.0', 'Content-Type: text/html; charset=utf-8',
+        'Content-Transfer-Encoding: base64', '',
+        btoa(unescape(encodeURIComponent(fullHtml)))
+      ].join("\r\n"));
+    }
+
+    async function sendGmailHtml(to, subj, htmlBody) {
+      const token = await getGmailToken();
+      const raw = buildHtmlMime(to, subj, htmlBody);
+      const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ raw })
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || "Erreur Gmail"); }
+    }
+
+    async function sendGmail(to, subj, body, pdfB64=null, filename=null) {
   const token = await getGmailToken();
   const raw = pdfB64 ? buildMimeWithPdf(to, subj, body, pdfB64, filename) : buildMime(to, subj, body);
   const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
@@ -496,42 +532,6 @@ function Devoir({sid, sname, onBack}) {
     finally { setBusy(false); setStatus(""); }
   };
 
-  /* ── Génération PDF corrigé (jsPDF pur, pas de pdf-lib) ── */
-  const buildCorrigePdf = async (c, prenom, appreciation, conseil) => {
-    const {jsPDF} = window.jspdf;
-    const pdf = new jsPDF({orientation:"portrait",unit:"mm",format:"a4"});
-    const M=15, PW=180, LH=5.5;
-    let y=M;
-    const write = (txt, opts={}) => {
-      if (!txt) return;
-      pdf.setFont("helvetica", opts.bold?"bold":"normal");
-      pdf.setFontSize(opts.size||10);
-      pdf.setTextColor(...(opts.color||[0,0,0]));
-      const lines = pdf.splitTextToSize(String(txt), PW);
-      lines.forEach(l=>{ if(y>282){pdf.addPage();y=M;} pdf.text(l,M,y); y+=LH; });
-      y+=(opts.after||1);
-    };
-    const nc = !isNaN(+c.note)?(+c.note>=10?[22,163,74]:[220,38,38]):[0,0,0];
-    write(`Corrigé — ${prenom}`,{bold:true,size:14,after:3});
-    write(`Note : ${c.note}/20`,{bold:true,size:12,color:nc,after:3});
-    write(appreciation,{size:10,color:[80,80,80],after:4});
-    pdf.setDrawColor(180,180,180); pdf.line(M,y,M+PW,y); y+=5;
-    // Demander le corrigé textuel à Claude
-    const corrTxt = await callClaude(apiKey,[{role:"user",content:
-      `Génère le corrigé complet pour ${prenom} (note ${c.note}/20).\n`+
-      `SUJET:\n${latex||"[fourni en PDF]"}\n\n`+
-      `DÉTAIL:\n${(c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n")}\n\n`+
-      `Formules mathématiques en notation lisible (f(x)=2x+3, x^2, sqrt(2), intégrale de a à b...)\n`+
-      `Exercice par exercice, question par question.`
-    }],"Professeur de maths. Texte lisible, formules en notation simple.");
-    write(corrTxt,{size:10,after:4});
-    pdf.setDrawColor(180,180,180); pdf.line(M,y,M+PW,y); y+=5;
-    write("Conseil :",{bold:true,size:10,after:1});
-    write(conseil,{size:10,color:[30,64,175],after:4});
-    write("Cordialement, F. Nocca",{size:9,color:[100,100,100]});
-    return pdfToBase64(pdf);
-  };
-
   /* ── Export CSV ── */
   const exportCsv = () => {
     const details0 = validCorrs[0]?.details || [];
@@ -583,24 +583,42 @@ function Devoir({sid, sname, onBack}) {
       const prenom = c.name.split(" ")[0];
       const appreciation = c.appreciation||"";
       const conseil = c.conseil||"";
-      const details = (c.details||[]).map(d=>`• ${d.exercice} : ${d.obtenu}/${d.sur} — ${d.remarque}`).join("\n");
-      const body = `Bonjour ${prenom},\n\nVoici ton résultat pour ce devoir de mathématiques.\n\nNOTE : ${c.note}/20\n\nAppréciation :\n${appreciation}\n\nDétail :\n${details}\n\nConseil :\n${conseil}\n\nCordialement,\nF. Nocca`;
-      const subj = `Résultats – ${sname}`;
+      const subj = "Résultats – "+sname;
+      const nc = !isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#111";
 
-      // Générer le PDF corrigé (optionnel — l'email part même sans)
-      let pdfB64=null, pdfName=null;
+      // Générer corrigé LaTeX → KaTeX HTML
+      setStatus("Corrigé pour "+prenom+"…");
+      let corrHtml = "";
       try {
-        setStatus(`Corrigé PDF pour ${prenom}…`);
-        pdfB64 = await buildCorrigePdf(c, prenom, appreciation, conseil);
-        pdfName = `corrige_${prenom}.pdf`;
-      } catch(e){ console.warn("PDF corrigé ignoré:", e.message); }
+        const corrLatex = await callClaude(apiKey, [{role:"user", content:
+          "Génère le corrigé complet en LaTeX pour "+prenom+" (note : "+c.note+"/20).\n"+
+          "SUJET :\n"+(latex||"[fourni en PDF]")+"\n\n"+
+          "DÉTAIL :\n"+(c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n")+"\n\n"+
+          "UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass), exercice par exercice avec formules."
+        }], "Professeur de maths lycée. LaTeX rigoureux.");
+        corrHtml = latexToHtml(corrLatex);
+      } catch(e){ corrHtml = (c.details||[]).map(d=>"<p><strong>"+d.exercice+"</strong> : "+d.remarque+"</p>").join(""); }
 
-      // Envoi Gmail
-      setStatus(`Envoi à ${prenom}…`);
-      try { await sendGmail(c.email, subj, body, pdfB64, pdfName); }
+      const detHtml = (c.details||[]).map(d=>
+        "<div class=\"detail\"><span class=\"exercice\">"+d.exercice+"</span> : <strong>"+d.obtenu+"/"+d.sur+"</strong> — "+d.remarque+"</div>"
+      ).join("");
+
+      const htmlBody =
+        "<h1>Résultats — "+prenom+"</h1>"+
+        "<p class=\"note\" style=\"color:"+nc+"\">Note : "+c.note+"/20</p>"+
+        "<p class=\"appreciation\">"+appreciation+"</p>"+
+        detHtml+
+        "<hr style=\"margin:20px 0;border:none;border-top:1px solid #e5e7eb\"/>"+
+        "<h2>Corrigé détaillé</h2>"+
+        corrHtml+
+        "<div class=\"conseil\"><strong>Conseil :</strong> "+conseil+"</div>"+
+        "<p class=\"signature\">Cordialement,<br/>F. Nocca</p>";
+
+      setStatus("Envoi à "+prenom+"…");
+      try { await sendGmailHtml(c.email, subj, htmlBody); }
       catch(e){ errors.push(c.name); console.error(e); }
     }
-    setMailsDone(true); setBusy(false);
+        setMailsDone(true); setBusy(false);
     setStatus(errors.length?`⚠️ Échec : ${errors.join(", ")}`: "");
   };
 
