@@ -538,7 +538,9 @@ function Devoir({sid, sname, onBack}) {
     const detH = details0.map(d=>`"${d.exercice} (pts)","${d.exercice} (remarque)"`).join(",");
     const header = `"Nom","Note /20","Appréciation","Conseil",${detH}`;
     const rows = validCorrs.map(c=>{
-      const base = [`"${c.name}"`,`"${c.note}"`,`"${(c.appreciation||"").replace(/"/g,"'")}"`,'`"${(c.conseil||"").replace(/"/g,"'")}"'`].join(",");
+      const appr = (c.appreciation||"").replace(/"/g,"'");
+        const cons = (c.conseil||"").replace(/"/g,"'");
+        const base = ['"'+c.name+'"','"'+c.note+'"','"'+appr+'"','"'+cons+'"'].join(",");
       const det = details0.map((_,i)=>{ const d=c.details?.[i]; return d?`"${d.obtenu}/${d.sur}","${(d.remarque||"").replace(/"/g,"'")}"`:`"",""`; }).join(",");
       return `"${c.name}","${c.note}","${(c.appreciation||"").replace(/"/g,"'")}","${(c.conseil||"").replace(/"/g,"'")}",${det}`;
     });
