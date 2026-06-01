@@ -72,25 +72,11 @@ function buildMime(to, subj, body) {
   ].join("\r\n"));
 }
 
-function buildMimeWithPdf(to, subj, body, pdfB64, filename) {
-  const bd = "b_" + Math.random().toString(36).slice(2);
-  return b64url([
-    `From: ${GMAIL_SENDER}`, `To: ${to}`,
-    `Subject: =?UTF-8?B?${btoa(unescape(encodeURIComponent(subj)))}?=`,
-    "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${bd}"`, "",
-    `--${bd}`, "Content-Type: text/plain; charset=utf-8",
-    "Content-Transfer-Encoding: base64", "",
-    btoa(unescape(encodeURIComponent(body))), "",
-    `--${bd}`, `Content-Type: application/pdf; name="${filename}"`,
-    "Content-Transfer-Encoding: base64", `Content-Disposition: attachment; filename="${filename}"`, "",
-    pdfB64, "", `--${bd}--`
-  ].join("\r\n"));
-}
 
-function buildHtmlMime(to, subj, htmlBody) {
-      const katexCss = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css";
-      const fullHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"/>'
-        + '<link rel="stylesheet" href="'+katexCss+'"/>'
+    function buildHtmlMime(to, subj, htmlBody) {
+      var katexCss = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css";
+      var fullHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"/>'
+        + '<link rel="stylesheet" href="' + katexCss + '"/>'
         + '<style>body{font-family:Georgia,serif;max-width:620px;margin:0 auto;padding:24px;color:#111;line-height:1.7;font-size:13pt}'
         + 'h1{font-size:15pt;border-bottom:1px solid #ccc;padding-bottom:8px;margin-bottom:16px}'
         + 'h2{font-size:13pt;margin-top:20px;margin-bottom:6px}'
@@ -104,10 +90,13 @@ function buildHtmlMime(to, subj, htmlBody) {
         + '.math-block{margin:10px 0;text-align:center}'
         + '</style></head><body>' + htmlBody + '</body></html>';
       return b64url([
-        'From: '+GMAIL_SENDER, 'To: '+to,
-        'Subject: =?UTF-8?B?'+btoa(unescape(encodeURIComponent(subj)))+'?=',
-        'MIME-Version: 1.0', 'Content-Type: text/html; charset=utf-8',
-        'Content-Transfer-Encoding: base64', '',
+        'From: ' + GMAIL_SENDER,
+        'To: ' + to,
+        'Subject: =?UTF-8?B?' + btoa(unescape(encodeURIComponent(subj))) + '?=',
+        'MIME-Version: 1.0',
+        'Content-Type: text/html; charset=utf-8',
+        'Content-Transfer-Encoding: base64',
+        '',
         btoa(unescape(encodeURIComponent(fullHtml)))
       ].join("\r\n"));
     }
@@ -122,17 +111,6 @@ function buildHtmlMime(to, subj, htmlBody) {
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || "Erreur Gmail"); }
     }
-
-    async function sendGmail(to, subj, body, pdfB64=null, filename=null) {
-  const token = await getGmailToken();
-  const raw = pdfB64 ? buildMimeWithPdf(to, subj, body, pdfB64, filename) : buildMime(to, subj, body);
-  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ raw })
-  });
-  if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || "Erreur Gmail"); }
-}
 
 /* ══════════════════════════════════════════════════════
    jsPDF → base64 (chunked, pas de stack overflow)
@@ -620,15 +598,6 @@ function Devoir({sid, sname, onBack}) {
     document.head.appendChild(s);
   });
 
-
-  /* ── Charge html2canvas à la demande ── */
-  const loadH2C = () => new Promise((res, rej) => {
-    if (window.html2canvas) { res(); return; }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
-    s.onload = res; s.onerror = rej;
-    document.head.appendChild(s);
-  });
 
   /* ── Génère l'image KaTeX du corrigé (partagée pour tous les élèves) ── */
   const corrImgRef = React.useRef(null);
