@@ -159,11 +159,28 @@ const getActive   = ()   => localStorage.getItem(ACTIVE)||null;
 const setActive   = (id) => localStorage.setItem(ACTIVE,id);
 const newId       = ()   => "s_"+Date.now();
 
+const DEFAULT_PROMPT = `Tu es un professeur de mathématiques expert, pédagogue et profondément bienveillant. Analyse la copie de l'élève avec un soin extrême.
+
+CONSIGNES DE NOTATION :
+- Valorise systématiquement la démarche : une méthode correcte avec une erreur de calcul (étourderie, signe) doit obtenir la majorité des points de la question.
+- Sois indulgent sur la rédaction mathématique mais exigeant sur la logique.
+- Valorise les débuts de recherche, les schémas ou les formules écrites, même si le calcul n'aboutit pas.
+- N'attribue jamais un 0/20 global. Si la copie est blanche ou hors-sujet, explique avec empathie comment démarrer la prochaine fois.
+- Si l'écriture est difficile à lire, accorde le bénéfice du doute et indique [illisible] si nécessaire.
+
+CONSIGNES DE RÉDACTION (TON) :
+- Tutoie l'élève obligatoirement. Utilise uniquement son prénom (sans son nom de famille).
+- Applique la méthode du "sandwich" : commence par un point positif fort, formule ensuite la critique constructive, et termine par un encouragement chaleureux.
+- Le conseil doit être une action concrète et ciblée (ex: "Entraîne-toi à factoriser avec l'identité remarquable...").
+
+IMPÉRATIF TECHNIQUE : Réponds EXCLUSIVEMENT sous la forme d'un tableau JSON valide, sans aucune phrase d'introduction, sans phrase de conclusion, et SANS balise de code markdown (pas de ```json).
+Structure : [{"name":"Prénom Nom","note":14,"appreciation":"Texte...","details":[{"exercice":"Exercice 1","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"Action concrète..."}]`;
+
 /* ══════════════════════════════════════════════════════
    API CLAUDE
 ══════════════════════════════════════════════════════ */
 async function callClaude(key, messages, system) {
-  const body = { model: "claude-sonnet-4-6", max_tokens: 2000, messages };
+  const body = { model: "claude-sonnet-4-6", max_tokens: 1500, messages };
   if (system) body.system = system;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -179,29 +196,37 @@ async function callClaude(key, messages, system) {
    LATEX → HTML (KaTeX)
 ══════════════════════════════════════════════════════ */
 function latexToHtml(src) {
-  if (!window.katex) return `<pre style="white-space:pre-wrap">${src}</pre>`;
+  if (!window.katex || !src) return `<pre style="white-space:pre-wrap">${src||""}</pre>`;
+  const rk = (m, display) => { try { return katex.renderToString(m.trim(), {displayMode:display, throwOnError:false, output:"html"}); } catch(e) { return m; } };
   let h = src
-    .replace(/\$\$([\s\S]+?)\$\$/g, (_,m) => { try { return `<div style="margin:10px 0;text-align:center">${katex.renderToString(m,{displayMode:true,throwOnError:false})}</div>`; } catch { return `$$${m}$$`; } })
-    .replace(/\$([^\$\n]+?)\$/g, (_,m) => { try { return katex.renderToString(m,{throwOnError:false}); } catch { return `$${m}$`; } });
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_,m) => `<div style="margin:10px 0;text-align:center">${rk(m,true)}</div>`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_,m) => rk(m,false))
+    .replace(/\$\$([\s\S]+?)\$\$/g,     (_,m) => `<div style="margin:10px 0;text-align:center">${rk(m,true)}</div>`)
+    .replace(/\$([^\$
+]+?)\$/g,        (_,m) => rk(m,false));
   h = h
-    .replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g,'<div style="text-align:center">$1</div>')
-    .replace(/\\textbf\{([^}]+)\}/g,'<strong>$1</strong>')
-    .replace(/\\textit\{([^}]+)\}/g,'<em>$1</em>')
-    .replace(/\{\\Large\\textbf\{([^}]+)\}\}/g,'<h1 style="font-size:16pt;text-align:center;margin:12px 0">$1</h1>')
-    .replace(/\\section\*?\{([^}]+)\}/g,'<h2 style="font-size:13pt;margin:16px 0 8px">$1</h2>')
-    .replace(/\\subsection\*?\{([^}]+)\}/g,'<h3 style="font-size:12pt;margin:12px 0 6px">$1</h3>')
-    .replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g,(_,b)=>`<ol style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,'<li>').replace(/<li>([^<]*)/g,'<li>$1</li>')}</ol>`)
-    .replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g,(_,b)=>`<ul style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,'<li>').replace(/<li>([^<]*)/g,'<li>$1</li>')}</ul>`)
-    .replace(/\\hfill/g,'<span style="float:right">')
-    .replace(/\\\\(\[[\d.]+pt\])?/g,'<br/>')
-    .replace(/\\vspace\{[^}]+\}/g,'<div style="height:8px"></div>')
-    .replace(/\\newline/g,'<br/>')
-    .replace(/\\hline/g,'')
-    .replace(/\\[a-zA-Z]+\{([^}]*)\}/g,'$1')
-    .replace(/\\[a-zA-Z]+/g,'')
-    .replace(/\n{2,}/g,'</p><p style="margin:5px 0">');
-  return '<p style="margin:5px 0">'+h+'</p>';
+    .replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>')
+    .replace(/\\textbf\{([^}]+)\}/g,  '<strong>$1</strong>')
+    .replace(/\\textit\{([^}]+)\}/g,  '<em>$1</em>')
+    .replace(/\{\\Large\\textbf\{([^}]+)\}\}/g, '<h1 style="font-size:16pt;text-align:center;margin:12px 0">$1</h1>')
+    .replace(/\\section\*?\{([^}]+)\}/g,    '<h2 style="font-size:13pt;margin:16px 0 8px">$1</h2>')
+    .replace(/\\subsection\*?\{([^}]+)\}/g, '<h3 style="font-size:12pt;margin:12px 0 6px">$1</h3>')
+    .replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, (_,b) =>
+      `<ol style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,"<li>").replace(/<li>([^<]*)/g,"<li>$1</li>")}</ol>`)
+    .replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, (_,b) =>
+      `<ul style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,"<li>").replace(/<li>([^<]*)/g,"<li>$1</li>")}</ul>`)
+    .replace(/\\hfill/g,  '<span style="float:right">')
+    .replace(/\\\\(\[[\d.]+pt\])?/g, '<br/>')
+    .replace(/\\vspace\{[^}]+\}/g,    '<div style="height:8px"></div>')
+    .replace(/\\newline/g, '<br/>')
+    .replace(/\\hline/g,   '')
+    .replace(/\\[a-zA-Z]+\{([^}]*)\}/g, '$1')
+    .replace(/\\[a-zA-Z]+/g, '')
+    .replace(/
+{2,}/g, '</p><p style="margin:5px 0">');
+  return '<p style="margin:5px 0">' + h + '</p>';
 }
+
 
 /* ══════════════════════════════════════════════════════
    MICRO-COMPOSANTS
@@ -346,8 +371,11 @@ function Devoir({sid, sname, onBack}) {
   /* Étape 2 – Correction */
   const [answers,     setAnswersR]    = useState(()=>ld("answers",{}));
   const [corrections, setCorrectionsR]= useState(()=>ld("corrections",[]));
+  const [corrPrompt,  setCorrPromptR] = useState(()=>ld("corrPrompt", DEFAULT_PROMPT));
+  const [showPrompt,  setShowPrompt]  = useState(false);
   const setAnswers     = v => { setAnswersR(v);     ps("answers",v);     };
   const setCorrections = v => { setCorrectionsR(v); ps("corrections",v); };
+  const setCorrPrompt  = v => { setCorrPromptR(v);  ps("corrPrompt",v);  };
 
   /* Étape 3 – Résultats */
   const [mailsDone, setMailsDoneR] = useState(()=>ld("mailsDone",false));
@@ -387,12 +415,16 @@ function Devoir({sid, sname, onBack}) {
   };
 
   /* ── Ajout copies PDF ── */
+  const namesExtracted = React.useRef(false);
   const addCopies = async (files) => {
     const arr = Array.from(files).filter(f=>f.type==="application/pdf");
     for (const f of arr) {
       const b64 = await readFile(f);
-      setCopies(prev=>[...prev,{name:f.name,b64}]);
-      if (copies.length===0) extractNames(b64);
+      setCopies(prev => [...prev, {name:f.name, b64}]);
+      if (!namesExtracted.current) {
+        namesExtracted.current = true;
+        extractNames(b64);
+      }
     }
   };
 
@@ -468,8 +500,7 @@ function Devoir({sid, sname, onBack}) {
             `JSON uniquement :\n[{"name":"Prénom Nom","pageStart":1,"pageEnd":2,"note":14,"appreciation":"Prénom, tu...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu devrais..."}]`
           }
         ];
-        const raw = await callClaude(apiKey,[{role:"user",content:blocks}],
-          "Correcteur bienveillant. Tutoiement, prénom seul. JSON uniquement.");
+        const raw = await callClaude(apiKey,[{role:"user",content:blocks}], corrPrompt);
         const arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
         allResults.push(...arr);
       }
@@ -497,8 +528,11 @@ function Devoir({sid, sname, onBack}) {
             `COPIE DE ${s.name} (prénom: ${s.name.split(" ")[0]}):\n${ans}\n`+
             `Tutoie et utilise le prénom seul.\n`+
             `JSON: {"note":14,"appreciation":"${s.name.split(" ")[0]}, tu...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"Tu..."}`
-          }], "Correcteur bienveillant. Tutoiement, prénom seul. JSON uniquement.");
-          results.push({...s,...JSON.parse(raw.replace(/```json|```/g,"").trim())});
+          }], corrPrompt);
+          const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
+          // Accepter objet ou tableau à un élément
+          const obj = Array.isArray(parsed) ? parsed[0] : parsed;
+          results.push({...s,...obj});
         } catch { results.push({...s,note:"?",appreciation:"Erreur.",details:[],conseil:""}); }
       }
       setCorrections(results);
@@ -521,7 +555,7 @@ function Devoir({sid, sname, onBack}) {
           `JSON: [{"name":"Prénom Nom","pageStart":1,"pageEnd":1,"note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"7","sur":"10","remarque":"..."}],"conseil":"..."}]`
         }
       ];
-      const raw = await callClaude(apiKey,[{role:"user",content:blocks}],"Correcteur bienveillant. JSON uniquement.");
+      const raw = await callClaude(apiKey,[{role:"user",content:blocks}], corrPrompt);
       const arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
       if (arr.length>0) {
         const r=arr[0];
@@ -570,57 +604,117 @@ function Devoir({sid, sname, onBack}) {
     pdf.save(`recap_${sname.replace(/[^a-z0-9]/gi,"_")}.pdf`);
   };
 
-  /* ── Envoi résultats ── */
-  const sendResults = async () => {
-    setBusy(true);
-    setStatus("Connexion Gmail…");
-    try { await getGmailToken(); }
-    catch(e){ setStatus("❌ Gmail : "+(e.message||e)); setBusy(false); return; }
+  /* ── Charge html2canvas à la demande ── */
+  const loadH2C = () => new Promise((res, rej) => {
+    if (window.html2canvas) { res(); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+    s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
 
-    const errors=[];
-    for (const c of corrections) {
-      if (c.skipped||!c.email) continue;
-      const prenom = c.name.split(" ")[0];
-      const appreciation = c.appreciation||"";
-      const conseil = c.conseil||"";
-      const subj = "Résultats – "+sname;
-      const nc = !isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#111";
 
-      // Générer corrigé LaTeX → KaTeX HTML
-      setStatus("Corrigé pour "+prenom+"…");
-      let corrHtml = "";
-      try {
-        const corrLatex = await callClaude(apiKey, [{role:"user", content:
-          "Génère le corrigé complet en LaTeX pour "+prenom+" (note : "+c.note+"/20).\n"+
-          "SUJET :\n"+(latex||"[fourni en PDF]")+"\n\n"+
-          "DÉTAIL :\n"+(c.details||[]).map(d=>d.exercice+" : "+d.remarque).join("\n")+"\n\n"+
-          "UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass), exercice par exercice avec formules."
-        }], "Professeur de maths lycée. LaTeX rigoureux.");
-        corrHtml = latexToHtml(corrLatex);
-      } catch(e){ corrHtml = (c.details||[]).map(d=>"<p><strong>"+d.exercice+"</strong> : "+d.remarque+"</p>").join(""); }
+  /* ── Charge html2canvas à la demande ── */
+  const loadH2C = () => new Promise((res, rej) => {
+    if (window.html2canvas) { res(); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+    s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
 
-      const detHtml = (c.details||[]).map(d=>
-        "<div class=\"detail\"><span class=\"exercice\">"+d.exercice+"</span> : <strong>"+d.obtenu+"/"+d.sur+"</strong> — "+d.remarque+"</div>"
-      ).join("");
-
-      const htmlBody =
-        "<h1>Résultats — "+prenom+"</h1>"+
-        "<p class=\"note\" style=\"color:"+nc+"\">Note : "+c.note+"/20</p>"+
-        "<p class=\"appreciation\">"+appreciation+"</p>"+
-        detHtml+
-        "<hr style=\"margin:20px 0;border:none;border-top:1px solid #e5e7eb\"/>"+
-        "<h2>Corrigé détaillé</h2>"+
-        corrHtml+
-        "<div class=\"conseil\"><strong>Conseil :</strong> "+conseil+"</div>"+
-        "<p class=\"signature\">Cordialement,<br/>F. Nocca</p>";
-
-      setStatus("Envoi à "+prenom+"…");
-      try { await sendGmailHtml(c.email, subj, htmlBody); }
-      catch(e){ errors.push(c.name); console.error(e); }
-    }
-        setMailsDone(true); setBusy(false);
-    setStatus(errors.length?`⚠️ Échec : ${errors.join(", ")}`: "");
+  /* ── Génère l'image KaTeX du corrigé (partagée pour tous les élèves) ── */
+  const corrImgRef = React.useRef(null);
+  const buildCorrImage = async () => {
+    if (corrImgRef.current) return corrImgRef.current;
+    const src = corrRef || "Corrigé non disponible.";
+    const div = document.createElement("div");
+    div.style.cssText = "position:fixed;left:-9999px;top:0;width:640px;background:#fff;padding:36px;font-family:Georgia,serif;color:#111;line-height:1.7;font-size:12pt";
+    div.innerHTML =
+      '<h2 style="font-size:14pt;margin-bottom:16px;border-bottom:1px solid #ccc;padding-bottom:8px">📝 Corrigé</h2>' +
+      latexToHtml(src);
+    document.body.appendChild(div);
+    await document.fonts.ready;
+    await new Promise(r => setTimeout(r, 1500));
+    await loadH2C();
+    const canvas = await window.html2canvas(div, {
+      scale: 1.5, useCORS: true, backgroundColor: "#ffffff", logging: false
+    });
+    document.body.removeChild(div);
+    const img = canvas.toDataURL("image/jpeg", 0.82);
+    corrImgRef.current = img;
+    return img;
   };
+
+  /* ── Envoi d'un seul élève ── */
+  const sendOne = async (cor, corrImg) => {
+    const prenom = cor.name.split(" ")[0];
+    const nc = !isNaN(+cor.note) ? (+cor.note >= 10 ? "#16a34a" : "#dc2626") : "#111";
+    const detRows = (cor.details||[]).map(d =>
+      `<tr style="border-top:1px solid #e5e7eb">` +
+      `<td style="padding:5px 8px;color:#555">${d.exercice}</td>` +
+      `<td style="padding:5px 8px;font-weight:600;white-space:nowrap">${d.obtenu}/${d.sur}</td>` +
+      `<td style="padding:5px 8px;color:#444">${d.remarque}</td></tr>`
+    ).join("");
+
+    const htmlBody =
+      '<div style="font-family:Georgia,serif;max-width:640px;margin:0 auto;padding:24px;color:#111">' +
+      '<h1 style="font-size:15pt;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px">Bonjour ' + prenom + ',</h1>' +
+      '<p style="font-size:13pt;margin-bottom:4px">Voici ton résultat pour <strong>' + sname + '</strong>.</p>' +
+      '<p style="font-size:26pt;font-weight:bold;color:' + nc + ';margin:12px 0">' + cor.note + '<span style="font-size:14pt;color:#555"> / 20</span></p>' +
+      '<p style="color:#555;font-style:italic;margin-bottom:16px">' + (cor.appreciation||"") + '</p>' +
+      (detRows ? '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:11pt">' + detRows + '</table>' : '') +
+      (corrImg ? '<img src="' + corrImg + '" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;display:block;margin:16px 0" alt="Corrigé"/>' : '') +
+      '<div style="background:#eff6ff;border-left:3px solid #3b82f6;padding:12px 16px;margin-top:16px;border-radius:4px;font-size:11pt;color:#1e40af">' +
+      '<strong>💡 Conseil :</strong> ' + (cor.conseil||"") + '</div>' +
+      '<p style="margin-top:20px;color:#555;font-size:11pt">Cordialement,<br/>F. Nocca</p></div>';
+
+    await sendGmailHtml(cor.email, "Résultats – " + sname, htmlBody);
+  };
+
+  /* ── Renvoi individuel ── */
+  const [resending, setResending] = React.useState(null);
+  const resendOne = async (cor) => {
+    if (!cor.email || busy) return;
+    setResending(cor.id);
+    try {
+      await getGmailToken();
+      const img = await buildCorrImage().catch(() => null);
+      await sendOne(cor, img);
+    } catch(e) { alert("Erreur renvoi : " + e.message); }
+    finally { setResending(null); }
+  };
+
+  /* ── Envoi de tous les résultats ── */
+  const sendResults = async () => {
+    const toSend = corrections.filter(c => !c.skipped && c.email);
+    if (!toSend.length) return;
+    setBusy(true);
+    try {
+      // 1. Connexion Gmail
+      setStatus("Connexion Gmail…");
+      await getGmailToken();
+
+      // 2. Générer l'image du corrigé UNE seule fois
+      setStatus("Génération du corrigé illustré…");
+      const corrImg = await buildCorrImage().catch(() => null);
+
+      // 3. Envoyer à chaque élève
+      const errors = [];
+      for (let i = 0; i < toSend.length; i++) {
+        setStatus("Envoi " + (i+1) + "/" + toSend.length + " — " + toSend[i].name.split(" ")[0] + "…");
+        try { await sendOne(toSend[i], corrImg); }
+        catch(e) { errors.push(toSend[i].name); console.error(e); }
+      }
+      setMailsDone(true);
+      setStatus(errors.length ? "⚠️ Échec : " + errors.join(", ") : "");
+    } catch(e) {
+      setStatus("❌ " + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
 
   /* ══════════════════ RENDU ══════════════════════════ */
   return (
@@ -733,6 +827,24 @@ function Devoir({sid, sname, onBack}) {
 
       {/* ═══ STEP 2 : Correction ═══ */}
       {step===2&&(<>
+        {/* Prompt éditable */}
+        {corrections.length===0&&(
+          <Card>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showPrompt?10:0}}>
+              <span style={{fontSize:13,color:"#6b7280"}}>🧠 Prompt de correction</span>
+              <button onClick={()=>setShowPrompt(!showPrompt)} style={{fontSize:11,padding:"3px 10px",background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>
+                {showPrompt?"Masquer":"Modifier"}
+              </button>
+            </div>
+            {showPrompt&&(<>
+              <textarea value={corrPrompt} onChange={e=>setCorrPrompt(e.target.value)}
+                style={{width:"100%",minHeight:220,fontFamily:"monospace",fontSize:11,marginTop:8}}/>
+              <button onClick={()=>setCorrPrompt(DEFAULT_PROMPT)} style={{fontSize:11,padding:"3px 10px",background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db",marginTop:6}}>
+                Remettre le prompt par défaut
+              </button>
+            </>)}
+          </Card>
+        )}
         {corrections.length===0&&(
           <Card>
             <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>📄 Copies à corriger</div>
@@ -815,13 +927,19 @@ function Devoir({sid, sname, onBack}) {
             <button onClick={exportCsv} style={{flex:1,fontSize:12,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>📊 CSV</button>
             <button onClick={exportRecap} disabled={!window.jspdf} style={{flex:1,fontSize:12,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>📄 PDF récap</button>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:12,marginBottom:16}}>
-            {validCorrs.map(c=>{
-              const nc=!isNaN(+c.note)?(+c.note>=10?"#16a34a":"#dc2626"):"#6b7280";
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginBottom:16}}>
+            {validCorrs.map(cor=>{
+              const nc=!isNaN(+cor.note)?(+cor.note>=10?"#16a34a":"#dc2626"):"#6b7280";
               return (
-                <div key={c.id} style={{background:"#f3f4f6",borderRadius:8,padding:14,textAlign:"center"}}>
-                  <div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>{c.name}</div>
-                  <div style={{fontSize:26,fontWeight:500,color:nc}}>{c.note}<span style={{fontSize:14,color:"#6b7280"}}>/20</span></div>
+                <div key={cor.id} style={{background:"#f3f4f6",borderRadius:8,padding:12,textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>{cor.name}</div>
+                  <div style={{fontSize:24,fontWeight:500,color:nc,marginBottom:6}}>{cor.note}<span style={{fontSize:13,color:"#6b7280"}}>/20</span></div>
+                  {cor.email&&<button
+                    onClick={()=>resendOne(cor)}
+                    disabled={!!resending||busy}
+                    style={{fontSize:10,padding:"2px 8px",background:"#fff",color:resending===cor.id?"#9ca3af":"#1d4ed8",border:"0.5px solid #93c5fd",borderRadius:4}}>
+                    {resending===cor.id?"…":"↩ Renvoyer"}
+                  </button>}
                 </div>
               );
             })}
@@ -831,18 +949,26 @@ function Devoir({sid, sname, onBack}) {
             <span style={{fontSize:18,fontWeight:500}}>{validCorrs.length>0?avg.toFixed(1):"—"}/20</span>
           </div>
           <div style={{background:"#f0fdf4",border:"0.5px solid #86efac",borderRadius:8,padding:"10px 12px",margin:"12px 0",fontSize:12,color:"#166534"}}>
-            ✉️ Mails envoyés depuis <strong>maths.perriand@gmail.com</strong> avec le corrigé en pièce jointe.<br/>
-            Un écran Google s'ouvrira la première fois.
+            ✉️ Envoyés depuis <strong>maths.perriand@gmail.com</strong> — le corrigé illustré est intégré dans chaque mail.<br/>
+            Un écran Google s'ouvrira la première fois pour autoriser l'envoi.
           </div>
           {busy&&status&&<p style={{textAlign:"center",fontSize:12,color:"#1d4ed8",marginBottom:8}}>⏳ {status}</p>}
           {mailsDone
             ?<div style={{textAlign:"center",padding:"1.5rem"}}>
                <div style={{fontSize:28,marginBottom:8}}>✅</div>
                <span style={{fontWeight:500,color:"#16a34a"}}>Mails envoyés à tous les élèves !</span>
+               <p style={{fontSize:11,color:"#9ca3af",marginTop:8}}>Utilisez les boutons "↩ Renvoyer" ci-dessus pour un renvoi individuel.</p>
              </div>
-            :<button disabled={busy} onClick={sendResults} style={{width:"100%",marginTop:8}}>
-               {busy?"…":"📬 Envoyer les résultats"}
-             </button>
+            :(<>
+               <div style={{fontSize:11,color:"#6b7280",textAlign:"center",margin:"8px 0"}}>
+                 ⏱ ~{Math.ceil(validCorrs.filter(x=>x.email).length*5/60)+1} min
+                 &nbsp;·&nbsp; ~{((validCorrs.filter(x=>x.email).length*0.005)+0.03).toFixed(2)}€
+                 &nbsp;·&nbsp; 0 appel Claude supplémentaire
+               </div>
+               <button disabled={busy} onClick={sendResults} style={{width:"100%",marginTop:4}}>
+                 {busy ? status : "📬 Envoyer à " + validCorrs.filter(x=>x.email).length + " élève" + (validCorrs.filter(x=>x.email).length>1?"s":"")}
+               </button>
+             </>)
           }
         </Card>
       )}
