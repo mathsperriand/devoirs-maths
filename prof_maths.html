@@ -196,34 +196,41 @@ async function callClaude(key, messages, system) {
    LATEX → HTML (KaTeX)
 ══════════════════════════════════════════════════════ */
 function latexToHtml(src) {
-  if (!window.katex || !src) return `<pre style="white-space:pre-wrap">${src||""}</pre>`;
-  const rk = (m, display) => { try { return katex.renderToString(m.trim(), {displayMode:display, throwOnError:false, output:"html"}); } catch(e) { return m; } };
-  let h = src
-    .replace(/\\\[([\s\S]+?)\\\]/g, (_,m) => `<div style="margin:10px 0;text-align:center">${rk(m,true)}</div>`)
-    .replace(/\\\(([\s\S]+?)\\\)/g, (_,m) => rk(m,false))
-    .replace(/\$\$([\s\S]+?)\$\$/g,     (_,m) => `<div style="margin:10px 0;text-align:center">${rk(m,true)}</div>`)
-    .replace(/\$([^\$
-]+?)\$/g,        (_,m) => rk(m,false));
-  h = h
-    .replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>')
-    .replace(/\\textbf\{([^}]+)\}/g,  '<strong>$1</strong>')
-    .replace(/\\textit\{([^}]+)\}/g,  '<em>$1</em>')
-    .replace(/\{\\Large\\textbf\{([^}]+)\}\}/g, '<h1 style="font-size:16pt;text-align:center;margin:12px 0">$1</h1>')
-    .replace(/\\section\*?\{([^}]+)\}/g,    '<h2 style="font-size:13pt;margin:16px 0 8px">$1</h2>')
-    .replace(/\\subsection\*?\{([^}]+)\}/g, '<h3 style="font-size:12pt;margin:12px 0 6px">$1</h3>')
-    .replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, (_,b) =>
-      `<ol style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,"<li>").replace(/<li>([^<]*)/g,"<li>$1</li>")}</ol>`)
-    .replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, (_,b) =>
-      `<ul style="padding-left:24px;margin:8px 0">${b.replace(/\\item\s+/g,"<li>").replace(/<li>([^<]*)/g,"<li>$1</li>")}</ul>`)
-    .replace(/\\hfill/g,  '<span style="float:right">')
-    .replace(/\\\\(\[[\d.]+pt\])?/g, '<br/>')
-    .replace(/\\vspace\{[^}]+\}/g,    '<div style="height:8px"></div>')
-    .replace(/\\newline/g, '<br/>')
-    .replace(/\\hline/g,   '')
-    .replace(/\\[a-zA-Z]+\{([^}]*)\}/g, '$1')
-    .replace(/\\[a-zA-Z]+/g, '')
-    .replace(/
-{2,}/g, '</p><p style="margin:5px 0">');
+  if (!window.katex || !src) return '<pre style="white-space:pre-wrap">' + (src||"") + '</pre>';
+  var rk = function(m, disp) {
+    try { return katex.renderToString(m.trim(), {displayMode:disp, throwOnError:false, output:"html"}); }
+    catch(e) { return m; }
+  };
+  // Traiter les maths en premier (avant toute autre transformation)
+  // \[...\] display
+  var h = src.replace(/\\\[([\s\S]+?)\\\]/g, function(_,m){ return '<div style="margin:10px 0;text-align:center">'+rk(m,true)+'</div>'; });
+  // \(...\) inline
+  h = h.replace(/\\\(([\s\S]+?)\\\)/g, function(_,m){ return rk(m,false); });
+  // $$...$$ display
+  h = h.replace(/\$\$([\s\S]+?)\$\$/g, function(_,m){ return '<div style="margin:10px 0;text-align:center">'+rk(m,true)+'</div>'; });
+  // $...$ inline (éviter les $$ déjà traités, pas de saut de ligne dans inline)
+  h = h.replace(/\$([^$\r\n]+?)\$/g, function(_,m){ return rk(m,false); });
+  // Macros LaTeX
+  h = h.replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g, '<div style="text-align:center">$1</div>');
+  h = h.replace(/\\textbf\{([^}]+)\}/g, '<strong>$1</strong>');
+  h = h.replace(/\\textit\{([^}]+)\}/g, '<em>$1</em>');
+  h = h.replace(/\{\\Large\\textbf\{([^}]+)\}\}/g, '<h1 style="font-size:16pt;text-align:center;margin:12px 0">$1</h1>');
+  h = h.replace(/\\section\*?\{([^}]+)\}/g, '<h2 style="font-size:13pt;margin:16px 0 8px">$1</h2>');
+  h = h.replace(/\\subsection\*?\{([^}]+)\}/g, '<h3 style="font-size:12pt;margin:12px 0 6px">$1</h3>');
+  h = h.replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, function(_,b){
+    return '<ol style="padding-left:24px;margin:8px 0">'+b.replace(/\\item\s+/g,'<li>').replace(/<li>([^<]*)/g,'<li>$1</li>')+'</ol>';
+  });
+  h = h.replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, function(_,b){
+    return '<ul style="padding-left:24px;margin:8px 0">'+b.replace(/\\item\s+/g,'<li>').replace(/<li>([^<]*)/g,'<li>$1</li>')+'</ul>';
+  });
+  h = h.replace(/\\hfill/g, '<span style="float:right">');
+  h = h.replace(/\\\\(\[[\d.]+pt\])?/g, '<br/>');
+  h = h.replace(/\\vspace\{[^}]+\}/g, '<div style="height:8px"></div>');
+  h = h.replace(/\\newline/g, '<br/>');
+  h = h.replace(/\\hline/g, '');
+  h = h.replace(/\\[a-zA-Z]+\{([^}]*)\}/g, '$1');
+  h = h.replace(/\\[a-zA-Z]+/g, '');
+  h = h.replace(/\n{2,}/g, '</p><p style="margin:5px 0">');
   return '<p style="margin:5px 0">' + h + '</p>';
 }
 
