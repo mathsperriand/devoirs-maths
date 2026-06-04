@@ -191,24 +191,57 @@ function latexToHtml(src) {
 }
 
 /* ══ Prompt de correction ═══════════════════════════════════════ */
-const DEFAULT_PROMPT = `Tu es un professeur de mathématiques expert, pédagogue et profondément bienveillant. Analyse la copie de l'élève avec un soin extrême.
+const DEFAULT_PROMPT = `Tu es un correcteur de mathématiques expert, pédagogue et profondément bienveillant.
 
-CONSIGNES DE NOTATION :
-- Valorise systématiquement la démarche : une méthode correcte avec une erreur de calcul doit obtenir la majorité des points.
-- Sois indulgent sur la rédaction mathématique mais exigeant sur la logique.
-- Valorise les débuts de recherche, les schémas ou les formules écrites, même si le calcul n'aboutit pas.
-- N'attribue jamais un 0/20 global. Si la copie est blanche, explique avec empathie comment démarrer.
-- Si l'écriture est difficile à lire, accorde le bénéfice du doute.
+════════════════════════════════════════
+PHASE 1 — DÉCHIFFRAGE (Chain of Thought)
+════════════════════════════════════════
+Avant toute notation, pour CHAQUE question, tu dois remplir le champ "transcription" :
+- Retranscris mot pour mot ce que tu lis sur la copie, même si c'est ambigu.
+- Note les ratures, les corrections, les symboles douteux.
+- Exemple : "Je lis : x2 - 4x + [symbole ambigu : pourrait être +3 ou -3]. La ligne suivante montre (x-1)(x-3), ce qui implique +3. Transcription retenue : x² - 4x + 3."
 
-CONSIGNES DE RÉDACTION :
-- Tutoie l'élève. Utilise uniquement son prénom (sans nom de famille).
+RÈGLES DE DÉDUCTION CONTEXTUELLE :
+- En cas de symbole ambigu (rature, '+' ressemblant à '-', chiffre illisible), regarde la ligne suivante pour déduire l'intention logique de l'élève.
+- Si le résultat final est correct, raisonne à rebours : le résultat implique que la démarche était correcte, donc lis en ce sens.
+- Une rature suivie d'une correction montre que l'élève a détecté son erreur — c'est une compétence à valoriser, pas à sanctionner.
+- Croise ce que tu lis avec ce qui est mathématiquement attendu à cette étape du calcul (le sujet te l'indique).
+- Accorde systématiquement le bénéfice du doute en cas d'hésitation.
+
+════════════════════════════════════════
+PHASE 2 — NOTATION
+════════════════════════════════════════
+- Valorise la démarche : une méthode correcte avec une erreur de calcul obtient la majorité des points.
+- Valorise les débuts de recherche, schémas, formules écrites, même si le calcul n'aboutit pas.
+- Sois indulgent sur la rédaction mathématique, exigeant sur la logique.
+- N'attribue jamais 0/20 global. Si copie blanche, explique avec empathie comment démarrer.
+
+════════════════════════════════════════
+PHASE 3 — RÉDACTION DU RETOUR
+════════════════════════════════════════
+- Tutoie l'élève. Prénom seul (sans nom de famille).
 - Méthode sandwich : point positif fort → critique constructive → encouragement chaleureux.
-- Le conseil doit être une action concrète (ex : "Entraîne-toi à factoriser...").
+- Conseil = action concrète et ciblée (ex : "Entraîne-toi à factoriser avec (a+b)²...").
+- Dans "appreciation", "remarque" et "conseil" : français courant uniquement, pas de LaTeX ni de $formules$.
 
-IMPÉRATIF : Dans les champs "appreciation", "remarque" et "conseil", écris UNIQUEMENT en français courant — pas de LaTeX, pas de $formules$. Les formules mathématiques sont réservées au corrigé séparé.
-
-FORMAT : Réponds EXCLUSIVEMENT en JSON valide, sans introduction, sans conclusion, sans balise markdown (pas de \`\`\`json).
-Structure : [{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Exercice 1","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
+════════════════════════════════════════
+FORMAT DE RÉPONSE
+════════════════════════════════════════
+JSON valide uniquement — sans introduction, sans conclusion, sans balise markdown (pas de \`\`\`json).
+Structure OBLIGATOIRE :
+[{
+  "name": "Prénom Nom",
+  "note": 14,
+  "appreciation": "Lucas, tu maîtrises...",
+  "details": [{
+    "exercice": "Exercice 1",
+    "transcription": "Ce que j'ai lu sur la copie : ...",
+    "obtenu": "3.5",
+    "sur": "5",
+    "remarque": "Bonne démarche..."
+  }],
+  "conseil": "Entraîne-toi à..."
+}]`;
 
 /* ══ Micro-composants ═════════════════════════════════════════════ */
 function Card({ children, style }) {
@@ -937,9 +970,17 @@ function Devoir({ sid, sname, onBack }) {
                         <p style={{fontSize:13,color:"#6b7280",margin:"0 0 8px"}}>{c.appreciation}</p>
                         {(c.details||[]).map(function(d,i) {
                           return (
-                            <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0",borderTop:"0.5px solid #e5e7eb"}}>
-                              <span style={{color:"#6b7280"}}>{d.exercice}</span>
-                              <span style={{fontWeight:500}}>{d.obtenu}/{d.sur} — {d.remarque}</span>
+                            <div key={i} style={{padding:"6px 0",borderTop:"0.5px solid #e5e7eb",fontSize:12}}>
+                              <div style={{display:"flex",justifyContent:"space-between"}}>
+                                <span style={{color:"#6b7280",fontWeight:500}}>{d.exercice}</span>
+                                <span style={{fontWeight:600}}>{d.obtenu}/{d.sur}</span>
+                              </div>
+                              {d.transcription && (
+                                <div style={{fontSize:11,color:"#9ca3af",fontStyle:"italic",margin:"2px 0",background:"#f9fafb",padding:"3px 6px",borderRadius:4}}>
+                                  🔍 {d.transcription}
+                                </div>
+                              )}
+                              <div style={{color:"#444"}}>{d.remarque}</div>
                             </div>
                           );
                         })}
