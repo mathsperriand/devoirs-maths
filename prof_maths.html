@@ -190,31 +190,17 @@ function latexToHtml(src) {
   return "<p style=\"margin:5px 0\">" + h + "</p>";
 }
 
-/* ══ Prompts de correction (deux modes pour optimiser le coût) ═══ */
+/* ══ Prompt de correction adaptatif (manuscrit + tapé, pleine qualité) ══ */
+const DEFAULT_PROMPT = `Tu es un correcteur de mathématiques expert, pédagogue et profondément bienveillant. Le PDF peut contenir des copies manuscrites, tapées, ou les deux.
 
-// MODE MANUSCRIT : Chain-of-Thought complet pour déchiffrer l'écriture
-const PROMPT_MANUSCRIT = `Correcteur de maths expert et bienveillant. Copies MANUSCRITES.
+LECTURE ADAPTATIVE : Si une réponse est manuscrite ou contient des éléments ambigus (symbole douteux, rature, écriture difficile), remplis le champ "transcription" en décrivant ce que tu lis et comment tu l'interprètes. Pour les parties tapées et clairement lisibles, omets ce champ ou écris null. Règles de déduction : symbole ambigu → regarde la ligne suivante pour déduire l'intention ; résultat final correct → raisonne à rebours (la démarche était correcte) ; rature suivie d'une correction → compétence à valoriser, pas à sanctionner ; bénéfice du doute systématique.
 
-DÉCHIFFRAGE (obligatoire avant notation) : Pour chaque question, remplis "transcription" en retranscrivant ce que tu lis. Règles : symbole ambigu → regarde la ligne suivante ; résultat correct → raisonne à rebours ; rature+correction → compétence à valoriser ; bénéfice du doute systématique ; croise avec ce qui est mathématiquement attendu.
+NOTATION : valorise la démarche (méthode correcte avec erreur de calcul = majorité des points) ; valorise les débuts de recherche, schémas, formules même sans aboutir ; jamais 0/20 ; indulgent sur la rédaction, exigeant sur la logique.
 
-NOTATION : valorise la démarche (méthode correcte = majorité des points même avec erreur de calcul) ; valorise les débuts de recherche ; jamais 0/20.
+RÉDACTION : tutoie l'élève (prénom seul, sans nom) ; méthode sandwich (point positif fort → critique constructive → encouragement chaleureux) ; conseil concret et ciblé (ex : "Entraîne-toi à factoriser..."). Français courant uniquement — pas de LaTeX dans appreciation, remarque ni conseil.
 
-RÉDACTION : tutoie (prénom seul) ; méthode sandwich ; conseil concret 1 phrase. Français courant UNIQUEMENT (pas de LaTeX). Sois bref : appreciation = 2 phrases max, remarque = 1 phrase, conseil = 1 phrase.
-
-JSON uniquement, sans markdown ni \`\`\`json :
-[{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Ex 1","transcription":"Lu : ...","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
-
-// MODE TAPÉ : prompt compact sans Chain-of-Thought
-const PROMPT_TAPE = `Correcteur de maths expert et bienveillant. Copies TAPÉES (lisibles).
-
-NOTATION : valorise la démarche (méthode correcte = majorité des points même avec erreur de calcul) ; valorise les débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
-
-RÉDACTION : tutoie (prénom seul) ; méthode sandwich ; conseil concret. Français courant UNIQUEMENT (pas de LaTeX). Sois bref : appreciation = 2 phrases max, remarque = 1 phrase, conseil = 1 phrase.
-
-JSON uniquement, sans markdown ni \`\`\`json :
-[{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
-
-const DEFAULT_PROMPT = PROMPT_MANUSCRIT;
+FORMAT : JSON valide uniquement, sans introduction, sans conclusion, sans \`\`\`json.
+[{"name":"Prénom Nom","note":14,"appreciation":"Texte bienveillant et détaillé...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"Explication précise de la note..."}],"conseil":"Action concrète et ciblée..."}]`;
 
 /* ══ Micro-composants ═════════════════════════════════════════════ */
 function Card({ children, style }) {
@@ -364,8 +350,6 @@ function Devoir({ sid, sname, onBack }) {
   var namesExtracted = useRef(false);
 
   // Étape 2 – Correction
-  var [copiesType,  setCopiesTypeR]  = useState(function() { return ld("copiesType","manuscrit"); });
-  function setCopiesType(v) { setCopiesTypeR(v); ps("copiesType",v); var p = v==="manuscrit" ? PROMPT_MANUSCRIT : PROMPT_TAPE; setCorrPromptR(p); ps("corrPrompt",p); }
   var [corrPrompt,  setCorrPromptR]  = useState(function() { return ld("corrPrompt", DEFAULT_PROMPT); });
   function setCorrPrompt(v) { setCorrPromptR(v); ps("corrPrompt",v); }
   var [showPrompt,  setShowPrompt]   = useState(false);
@@ -855,28 +839,9 @@ function Devoir({ sid, sname, onBack }) {
       {/* ═══ STEP 2 : Correction ═══ */}
       {step === 2 && (
         <div>
-          {/* Toggle manuscrit / tapé + Prompt éditable */}
+          {/* Prompt éditable */}
           {corrections.length === 0 && (
             <Card>
-              <div style={{marginBottom:12}}>
-                <div style={{fontSize:13,fontWeight:500,marginBottom:8}}>📝 Type de copies</div>
-                <div style={{display:"flex",gap:8}}>
-                  {[["manuscrit","✍️ Manuscrites","Chain-of-Thought actif"],["tape","⌨️ Tapées / Imprimées","Prompt compact (-40% de coût)"]].map(function(t){
-                    var val=t[0],lbl=t[1],sub=t[2];
-                    return (
-                      <button key={val} onClick={function(){setCopiesType(val);}} style={{
-                        flex:1,padding:"8px 4px",fontSize:12,fontWeight:500,textAlign:"center",
-                        background:copiesType===val?"#1d4ed8":"#f3f4f6",
-                        color:copiesType===val?"#fff":"#6b7280",
-                        border:copiesType===val?"none":"0.5px solid #e5e7eb",borderRadius:8
-                      }}>
-                        <div>{lbl}</div>
-                        <div style={{fontSize:10,opacity:.8,fontWeight:400}}>{sub}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showPrompt?10:0}}>
                 <span style={{fontSize:13,color:"#6b7280"}}>🧠 Prompt de correction</span>
                 <button onClick={function(){setShowPrompt(!showPrompt);}} style={{fontSize:11,padding:"3px 10px",background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>
