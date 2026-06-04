@@ -555,6 +555,8 @@ function Devoir({ sid, sname, onBack }) {
       }));
     } catch(e) { setStatus("❌ " + e.message); console.error("correctFromPdf:", e); }
     finally { setBusy(false); }
+    // Générer le corrigé LaTeX si absent (un seul appel pour tous les élèves)
+    await buildCorrRef();
   }
 
   /* ── Correction manuelle ── */
@@ -583,6 +585,8 @@ function Devoir({ sid, sname, onBack }) {
       }
       setCorrections(results);
     } finally { setBusy(false); }
+    // Générer le corrigé LaTeX si absent
+    await buildCorrRef();
   }
 
   /* ── Copie en retard ── */
@@ -614,6 +618,42 @@ function Devoir({ sid, sname, onBack }) {
       }
     } catch(e) { setStatus("❌ " + e.message); }
     finally { setBusy(false); }
+  }
+
+  /* ── Générer le corrigé LaTeX depuis le sujet PDF (1 seul appel) ── */
+  async function buildCorrRef() {
+    if (corrRef) return; // Déjà disponible
+    if (!apiKey) return;
+    setStatus("Génération du corrigé en LaTeX…");
+    try {
+      var blocks = [];
+      if (upSubPdf) {
+        blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
+      }
+      blocks.push({ type:"text", text:
+        "Génère le corrigé complet de cet examen en LaTeX.
+" +
+        "Retourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), " +
+        "exercice par exercice, avec toutes les formules mathématiques en LaTeX ($...$ ou $$...$$).
+" +
+        "Format exemple :
+" +
+        "\\section*{Corrigé Exercice 1}
+" +
+        "\\begin{enumerate}
+" +
+        "  \\item On calcule $f'(x) = 2x - 4$...
+" +
+        "\\end{enumerate}"
+      });
+      var raw = await callClaude(apiKey,
+        [{ role:"user", content:blocks }],
+        "Tu es professeur de maths au lycée français. LaTeX rigoureux pour toutes les formules. Retourne uniquement le contenu LaTeX du corrigé."
+      );
+      setCorrRef(raw.trim());
+      corrImgRef.current = null; // Invalider le cache image
+    } catch(e) { console.warn("buildCorrRef:", e); }
+    setStatus("");
   }
 
   /* ── Construire le HTML d'un mail élève ── */
@@ -991,6 +1031,22 @@ function Devoir({ sid, sname, onBack }) {
       {/* ═══ STEP 3 : Résultats ═══ */}
       {step === 3 && (
         <Card>
+          {/* Aperçu corrigé KaTeX */}
+          {corrRef && (
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:13,fontWeight:500,marginBottom:8,color:"#374151"}}>
+                📐 Aperçu du corrigé — tel que reçu par les élèves
+              </div>
+              <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"20px 24px",lineHeight:1.8,fontSize:13,maxHeight:300,overflowY:"auto"}}
+                dangerouslySetInnerHTML={{__html:latexToHtml(corrRef)}}/>
+            </div>
+          )}
+          {!corrRef && (
+            <div style={{background:"#fefce8",border:"0.5px solid #fde68a",borderRadius:8,padding:"10px 12px",marginBottom:16,fontSize:12,color:"#92400e"}}>
+              ⏳ Corrigé en cours de génération…
+            </div>
+          )}
+
           {/* Exports */}
           <div style={{display:"flex",gap:8,marginBottom:16}}>
             <button onClick={exportCsv} style={{flex:1,fontSize:12,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>📊 CSV</button>
