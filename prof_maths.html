@@ -130,7 +130,7 @@ function newId()         { return "s_" + Date.now(); }
 
 /* ══ API Claude ═══════════════════════════════════════════════════ */
 async function callClaude(key, messages, system) {
-  var body = { model: "claude-sonnet-4-6", max_tokens: 1500, messages: messages };
+  var body = { model: "claude-sonnet-4-6", max_tokens: 2000, messages: messages };
   if (system) body.system = system;
   var res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -479,7 +479,7 @@ function Devoir({ sid, sname, onBack }) {
       setLatex(sep > 0 ? res.slice(0, sep).trim() : res);
       setCorrRef(sep > 0 ? res.slice(sep + 16).trim() : "");
     } catch(e) { setStatus("Erreur : " + e.message); }
-    finally { setBusy(false); setStatus(""); }
+    finally { setBusy(false); }
   }
 
   /* ── Charger html2canvas à la demande ── */
@@ -516,8 +516,8 @@ function Devoir({ sid, sname, onBack }) {
         srcY += sliceH; remaining -= sliceH;
       }
       pdf.save("sujet_maths.pdf");
-    } catch(e) { setStatus("Erreur PDF : " + e.message); }
-    finally { setBusy(false); setStatus(""); }
+    } catch(e) { setStatus("❌ PDF : " + e.message); }
+    finally { setBusy(false); }
   }
 
   /* ── Construire l'image du corrigé (KaTeX → html2canvas, mise en cache) ── */
@@ -589,8 +589,8 @@ function Devoir({ sid, sname, onBack }) {
         });
         return found ? Object.assign({}, s, found) : Object.assign({}, s, { skipped:true });
       }));
-    } catch(e) { setStatus("Erreur : " + e.message); }
-    finally { setBusy(false); setStatus(""); }
+    } catch(e) { setStatus("❌ " + e.message); console.error("correctFromPdf:", e); }
+    finally { setBusy(false); }
   }
 
   /* ── Correction manuelle ── */
@@ -618,7 +618,7 @@ function Devoir({ sid, sname, onBack }) {
         } catch(e) { results.push(Object.assign({}, s, { note:"?", appreciation:"Erreur.", details:[], conseil:"" })); }
       }
       setCorrections(results);
-    } finally { setBusy(false); setStatus(""); }
+    } finally { setBusy(false); }
   }
 
   /* ── Copie en retard ── */
@@ -648,8 +648,8 @@ function Devoir({ sid, sname, onBack }) {
           return prev.concat([Object.assign({}, existing || { id: Date.now(), name: r.name, email: "" }, r)]);
         });
       }
-    } catch(e) { setStatus("Erreur : " + e.message); }
-    finally { setBusy(false); setStatus(""); }
+    } catch(e) { setStatus("❌ " + e.message); }
+    finally { setBusy(false); }
   }
 
   /* ── Construire le HTML d'un mail élève ── */
@@ -923,9 +923,14 @@ function Devoir({ sid, sname, onBack }) {
                 </div>
               )}
               {copies.length > 0 && (
-                <button disabled={busy||!apiKey} onClick={correctFromPdf} style={{width:"100%",marginBottom:8}}>
-                  {busy ? status : "🤖 Corriger depuis les PDFs ↗"}
-                </button>
+                <div>
+                  <button disabled={busy||!apiKey} onClick={correctFromPdf} style={{width:"100%",marginBottom:6}}>
+                    {busy ? status : "🤖 Corriger depuis les PDFs ↗"}
+                  </button>
+                  {!busy && status && status.startsWith("❌") && (
+                    <p style={{fontSize:12,color:"#dc2626",textAlign:"center",marginBottom:4}}>{status}</p>
+                  )}
+                </div>
               )}
               <div style={{textAlign:"center",fontSize:12,color:"#9ca3af",margin:"10px 0 6px"}}>— ou saisir les réponses manuellement —</div>
               {parsedStudents.map(function(s) {
