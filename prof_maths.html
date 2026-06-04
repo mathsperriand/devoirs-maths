@@ -190,58 +190,31 @@ function latexToHtml(src) {
   return "<p style=\"margin:5px 0\">" + h + "</p>";
 }
 
-/* ══ Prompt de correction ═══════════════════════════════════════ */
-const DEFAULT_PROMPT = `Tu es un correcteur de mathématiques expert, pédagogue et profondément bienveillant.
+/* ══ Prompts de correction (deux modes pour optimiser le coût) ═══ */
 
-════════════════════════════════════════
-PHASE 1 — DÉCHIFFRAGE (Chain of Thought)
-════════════════════════════════════════
-Avant toute notation, pour CHAQUE question, tu dois remplir le champ "transcription" :
-- Retranscris mot pour mot ce que tu lis sur la copie, même si c'est ambigu.
-- Note les ratures, les corrections, les symboles douteux.
-- Exemple : "Je lis : x2 - 4x + [symbole ambigu : pourrait être +3 ou -3]. La ligne suivante montre (x-1)(x-3), ce qui implique +3. Transcription retenue : x² - 4x + 3."
+// MODE MANUSCRIT : Chain-of-Thought complet pour déchiffrer l'écriture
+const PROMPT_MANUSCRIT = `Correcteur de maths expert et bienveillant. Copies MANUSCRITES.
 
-RÈGLES DE DÉDUCTION CONTEXTUELLE :
-- En cas de symbole ambigu (rature, '+' ressemblant à '-', chiffre illisible), regarde la ligne suivante pour déduire l'intention logique de l'élève.
-- Si le résultat final est correct, raisonne à rebours : le résultat implique que la démarche était correcte, donc lis en ce sens.
-- Une rature suivie d'une correction montre que l'élève a détecté son erreur — c'est une compétence à valoriser, pas à sanctionner.
-- Croise ce que tu lis avec ce qui est mathématiquement attendu à cette étape du calcul (le sujet te l'indique).
-- Accorde systématiquement le bénéfice du doute en cas d'hésitation.
+DÉCHIFFRAGE (obligatoire avant notation) : Pour chaque question, remplis "transcription" en retranscrivant ce que tu lis. Règles : symbole ambigu → regarde la ligne suivante ; résultat correct → raisonne à rebours ; rature+correction → compétence à valoriser ; bénéfice du doute systématique ; croise avec ce qui est mathématiquement attendu.
 
-════════════════════════════════════════
-PHASE 2 — NOTATION
-════════════════════════════════════════
-- Valorise la démarche : une méthode correcte avec une erreur de calcul obtient la majorité des points.
-- Valorise les débuts de recherche, schémas, formules écrites, même si le calcul n'aboutit pas.
-- Sois indulgent sur la rédaction mathématique, exigeant sur la logique.
-- N'attribue jamais 0/20 global. Si copie blanche, explique avec empathie comment démarrer.
+NOTATION : valorise la démarche (méthode correcte = majorité des points même avec erreur de calcul) ; valorise les débuts de recherche ; jamais 0/20.
 
-════════════════════════════════════════
-PHASE 3 — RÉDACTION DU RETOUR
-════════════════════════════════════════
-- Tutoie l'élève. Prénom seul (sans nom de famille).
-- Méthode sandwich : point positif fort → critique constructive → encouragement chaleureux.
-- Conseil = action concrète et ciblée (ex : "Entraîne-toi à factoriser avec (a+b)²...").
-- Dans "appreciation", "remarque" et "conseil" : français courant uniquement, pas de LaTeX ni de $formules$.
+RÉDACTION : tutoie (prénom seul) ; méthode sandwich ; conseil concret 1 phrase. Français courant UNIQUEMENT (pas de LaTeX). Sois bref : appreciation = 2 phrases max, remarque = 1 phrase, conseil = 1 phrase.
 
-════════════════════════════════════════
-FORMAT DE RÉPONSE
-════════════════════════════════════════
-JSON valide uniquement — sans introduction, sans conclusion, sans balise markdown (pas de \`\`\`json).
-Structure OBLIGATOIRE :
-[{
-  "name": "Prénom Nom",
-  "note": 14,
-  "appreciation": "Lucas, tu maîtrises...",
-  "details": [{
-    "exercice": "Exercice 1",
-    "transcription": "Ce que j'ai lu sur la copie : ...",
-    "obtenu": "3.5",
-    "sur": "5",
-    "remarque": "Bonne démarche..."
-  }],
-  "conseil": "Entraîne-toi à..."
-}]`;
+JSON uniquement, sans markdown ni \`\`\`json :
+[{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Ex 1","transcription":"Lu : ...","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
+
+// MODE TAPÉ : prompt compact sans Chain-of-Thought
+const PROMPT_TAPE = `Correcteur de maths expert et bienveillant. Copies TAPÉES (lisibles).
+
+NOTATION : valorise la démarche (méthode correcte = majorité des points même avec erreur de calcul) ; valorise les débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
+
+RÉDACTION : tutoie (prénom seul) ; méthode sandwich ; conseil concret. Français courant UNIQUEMENT (pas de LaTeX). Sois bref : appreciation = 2 phrases max, remarque = 1 phrase, conseil = 1 phrase.
+
+JSON uniquement, sans markdown ni \`\`\`json :
+[{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Ex 1","obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
+
+const DEFAULT_PROMPT = PROMPT_MANUSCRIT;
 
 /* ══ Micro-composants ═════════════════════════════════════════════ */
 function Card({ children, style }) {
@@ -391,6 +364,8 @@ function Devoir({ sid, sname, onBack }) {
   var namesExtracted = useRef(false);
 
   // Étape 2 – Correction
+  var [copiesType,  setCopiesTypeR]  = useState(function() { return ld("copiesType","manuscrit"); });
+  function setCopiesType(v) { setCopiesTypeR(v); ps("copiesType",v); var p = v==="manuscrit" ? PROMPT_MANUSCRIT : PROMPT_TAPE; setCorrPromptR(p); ps("corrPrompt",p); }
   var [corrPrompt,  setCorrPromptR]  = useState(function() { return ld("corrPrompt", DEFAULT_PROMPT); });
   function setCorrPrompt(v) { setCorrPromptR(v); ps("corrPrompt",v); }
   var [showPrompt,  setShowPrompt]   = useState(false);
@@ -404,6 +379,11 @@ function Devoir({ sid, sname, onBack }) {
   function setMailsDone(v) { setMailsDoneR(v); ps("mailsDone",v); }
   var [resending,   setResending]    = useState(null);
   var corrImgRef = useRef(null);
+  // Invalider le cache image si on recommence une correction
+  function resetCorrections() {
+    setCorrections([]);
+    corrImgRef.current = null;
+  }
 
   // Dérivés
   var parsedStudents = students.trim().split("\n").filter(Boolean).map(function(line, i) {
@@ -875,9 +855,28 @@ function Devoir({ sid, sname, onBack }) {
       {/* ═══ STEP 2 : Correction ═══ */}
       {step === 2 && (
         <div>
-          {/* Prompt éditable */}
+          {/* Toggle manuscrit / tapé + Prompt éditable */}
           {corrections.length === 0 && (
             <Card>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:500,marginBottom:8}}>📝 Type de copies</div>
+                <div style={{display:"flex",gap:8}}>
+                  {[["manuscrit","✍️ Manuscrites","Chain-of-Thought actif"],["tape","⌨️ Tapées / Imprimées","Prompt compact (-40% de coût)"]].map(function(t){
+                    var val=t[0],lbl=t[1],sub=t[2];
+                    return (
+                      <button key={val} onClick={function(){setCopiesType(val);}} style={{
+                        flex:1,padding:"8px 4px",fontSize:12,fontWeight:500,textAlign:"center",
+                        background:copiesType===val?"#1d4ed8":"#f3f4f6",
+                        color:copiesType===val?"#fff":"#6b7280",
+                        border:copiesType===val?"none":"0.5px solid #e5e7eb",borderRadius:8
+                      }}>
+                        <div>{lbl}</div>
+                        <div style={{fontSize:10,opacity:.8,fontWeight:400}}>{sub}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showPrompt?10:0}}>
                 <span style={{fontSize:13,color:"#6b7280"}}>🧠 Prompt de correction</span>
                 <button onClick={function(){setShowPrompt(!showPrompt);}} style={{fontSize:11,padding:"3px 10px",background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>
@@ -1011,7 +1010,7 @@ function Devoir({ sid, sname, onBack }) {
                 );
               })}
               <div style={{display:"flex",gap:8,marginTop:4}}>
-                <button onClick={function(){setCorrections([]);}} style={{flex:1,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>
+                <button onClick={function(){resetCorrections();}} style={{flex:1,background:"#f3f4f6",color:"#374151",border:"0.5px solid #d1d5db"}}>
                   ↩ Recommencer
                 </button>
                 <button disabled={busy||!apiKey} onClick={function(){document.getElementById("late-pdf").click();}} style={{flex:1,background:"#f3f4f6",color:"#1d4ed8",border:"0.5px solid #bfdbfe",fontSize:12}}>
