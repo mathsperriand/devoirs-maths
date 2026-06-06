@@ -130,7 +130,7 @@ function newId()         { return "s_" + Date.now(); }
 
 /* ══ API Claude ═══════════════════════════════════════════════════ */
 async function callClaude(key, messages, system) {
-  var body = { model: "claude-sonnet-4-6", max_tokens: 2000, messages: messages };
+  var body = { model: "claude-sonnet-4-6", max_tokens: 8000, messages: messages };
   if (system) body.system = system;
   var res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -362,6 +362,7 @@ function Devoir({ sid, sname, onBack }) {
   var [mailsDone,   setMailsDoneR]   = useState(function() { return ld("mailsDone",false); });
   function setMailsDone(v) { setMailsDoneR(v); ps("mailsDone",v); }
   var [resending,   setResending]    = useState(null);
+  var [progress,    setProgress]     = useState(null); // {current, total, label}
   var corrImgRef = useRef(null);
   // Invalider le cache image si on recommence une correction
   function resetCorrections() {
@@ -528,24 +529,32 @@ function Devoir({ sid, sname, onBack }) {
     setBusy(true);
     try {
       var allResults = [];
-      for (var i = 0; i < copies.length; i++) {
-        setStatus("Correction PDF " + (i+1) + "/" + copies.length + "…");
-        var blocks = [];
-        if (upSubPdf) {
-          blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
+      var LOT_SIZE = 10;
+      var totalLots = Math.ceil(copies.length / LOT_SIZE);
+      for (var lot = 0; lot < totalLots; lot++) {
+        var lotStart = lot * LOT_SIZE;
+        var lotEnd   = Math.min(lotStart + LOT_SIZE, copies.length);
+        if (totalLots > 1) {
+          setStatus("Lot " + (lot+1) + "/" + totalLots + " — copies " + (lotStart+1) + " à " + lotEnd + "…");
         }
-        blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:copies[i].b64 } });
-        blocks.push({ type:"text", text:
-          "Copies des élèves :\n" + parsedStudents.map(function(s){return "- "+s.name;}).join("\n") +
-          "\n\nSUJET" + (subjectMode==="upload" ? " (voir PDF joint)" : ":\n" + latex) +
-          "\n\nCORRIGÉ :\n" + (corrRef || "[utilise tes connaissances]") +
-          "\n\nLes copies peuvent être manuscrites. Si l'écriture est difficile, déduis du contexte et accorde le bénéfice du doute.\n" +
-          "Identifie chaque copie, ses pages dans CE PDF (numérotées depuis 1), corrige-la.\n" +
-          "JSON uniquement :\n[{\"name\":\"Prénom Nom\",\"pageStart\":1,\"pageEnd\":2,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
-        });
-        var raw = await callClaude(apiKey, [{ role:"user", content:blocks }], corrPrompt);
-        var arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
-        allResults = allResults.concat(arr);
+        for (var i = lotStart; i < lotEnd; i++) {
+          setStatus("Correction PDF " + (i+1) + "/" + copies.length + "…");
+          var blocks = [];
+          if (upSubPdf) {
+            blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
+          }
+          blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:copies[i].b64 } });
+          blocks.push({ type:"text", text:
+            "Copies des eleves :\n" + parsedStudents.map(function(s){return "- "+s.name;}).join("\n") +
+            "\n\nSUJET (voir PDF joint)" +
+            "\n\nLes copies peuvent etre manuscrites. Si l'ecriture est difficile, deduis du contexte et accorde le benefice du doute.\n" +
+            "Identifie chaque copie, ses pages dans CE PDF (numerotees depuis 1), corrige-la.\n" +
+            "JSON uniquement :\n[{\"name\":\"Prenom Nom\",\"pageStart\":1,\"pageEnd\":2,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
+          });
+          var raw = await callClaude(apiKey, [{ role:"user", content:blocks }], corrPrompt);
+          var arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
+          allResults = allResults.concat(arr);
+        }
       }
       setCorrections(parsedStudents.map(function(s) {
         var found = allResults.find(function(r) {
@@ -555,7 +564,6 @@ function Devoir({ sid, sname, onBack }) {
       }));
     } catch(e) { setStatus("❌ " + e.message); console.error("correctFromPdf:", e); }
     finally { setBusy(false); }
-    // Générer le corrigé LaTeX si absent (un seul appel pour tous les élèves)
     await buildCorrRef();
   }
 
@@ -622,7 +630,7 @@ function Devoir({ sid, sname, onBack }) {
 
   /* ── Générer le corrigé LaTeX depuis le sujet PDF (1 seul appel) ── */
   async function buildCorrRef() {
-    if (corrRef) return; // Déjà disponible
+    if (corrRef) return;
     if (!apiKey) return;
     setStatus("Génération du corrigé en LaTeX…");
     try {
@@ -630,28 +638,17 @@ function Devoir({ sid, sname, onBack }) {
       if (upSubPdf) {
         blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
       }
-      blocks.push({ type:"text", text:
-        "Génère le corrigé complet de cet examen en LaTeX.
-" +
-        "Retourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}), " +
-        "exercice par exercice, avec toutes les formules mathématiques en LaTeX ($...$ ou $$...$$).
-" +
-        "Format exemple :
-" +
-        "\\section*{Corrigé Exercice 1}
-" +
-        "\\begin{enumerate}
-" +
-        "  \\item On calcule $f'(x) = 2x - 4$...
-" +
-        "\\end{enumerate}"
-      });
+      var prompt = "Génère le corrigé complet de cet examen en LaTeX."
+        + " Retourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}),"
+        + " exercice par exercice, avec toutes les formules en LaTeX ($...$ ou $$...$$)."
+        + " Format : \\section*{Corrigé Exercice 1}\\n\\begin{enumerate}\\n  \\item solution avec $formule$\\n\\end{enumerate}";
+      blocks.push({ type:"text", text: prompt });
       var raw = await callClaude(apiKey,
         [{ role:"user", content:blocks }],
-        "Tu es professeur de maths au lycée français. LaTeX rigoureux pour toutes les formules. Retourne uniquement le contenu LaTeX du corrigé."
+        "Professeur de maths lycée. LaTeX rigoureux. Retourne uniquement le contenu LaTeX du corrigé."
       );
       setCorrRef(raw.trim());
-      corrImgRef.current = null; // Invalider le cache image
+      corrImgRef.current = null;
     } catch(e) { console.warn("buildCorrRef:", e); }
     setStatus("");
   }
@@ -711,10 +708,11 @@ function Devoir({ sid, sname, onBack }) {
 
       var errors = [];
       for (var i = 0; i < toSend.length; i++) {
-        setStatus("Envoi " + (i+1) + "/" + toSend.length + " — " + toSend[i].name.split(" ")[0] + "…");
+        setProgress({ current: i+1, total: toSend.length, label: toSend[i].name.split(" ")[0] });
         try { await sendOne(toSend[i], corrImg); }
         catch(e) { errors.push(toSend[i].name); console.error(e); }
       }
+      setProgress(null);
       setMailsDone(true);
       setStatus(errors.length ? "⚠️ Échec : " + errors.join(", ") : "");
     } catch(e) {
@@ -909,7 +907,7 @@ function Devoir({ sid, sname, onBack }) {
                 name={copies.length + " fichier" + (copies.length > 1 ? "s" : "") + " chargé" + (copies.length > 1 ? "s" : "")}
                 onFiles={addCopies}
                 label="Glissez un ou plusieurs PDFs ici ou cliquez"
-                sub="Vous pouvez déposer les copies en plusieurs fichiers séparés"/>
+                sub="Conseil : scanner à 150-200 DPI — traitement par lots de 10"/>
               {copies.length > 0 && (
                 <div style={{marginBottom:8}}>
                   {copies.map(function(p, i) {
@@ -931,8 +929,16 @@ function Devoir({ sid, sname, onBack }) {
                   <button disabled={busy||!apiKey} onClick={correctFromPdf} style={{width:"100%",marginBottom:6}}>
                     {busy ? status : "🤖 Corriger depuis les PDFs ↗"}
                   </button>
+                  {busy && status && (
+                    <p style={{fontSize:12,color:"#1d4ed8",textAlign:"center",marginBottom:4}}>⏳ {status}</p>
+                  )}
                   {!busy && status && status.startsWith("❌") && (
                     <p style={{fontSize:12,color:"#dc2626",textAlign:"center",marginBottom:4}}>{status}</p>
+                  )}
+                  {!busy && copies.length > 0 && (
+                    <p style={{fontSize:11,color:"#9ca3af",textAlign:"center",marginTop:2}}>
+                      {copies.length} fichier{copies.length>1?"s":""} — ~{Math.ceil(copies.length/10)} lot{Math.ceil(copies.length/10)>1?"s":""} — ~{Math.ceil(copies.length*8)} tokens de sortie estimés
+                    </p>
                   )}
                 </div>
               )}
@@ -1098,7 +1104,18 @@ function Devoir({ sid, sname, onBack }) {
                 &nbsp;·&nbsp; ~{((validCorrs.filter(function(c){return !!c.email;}).length*0.005)+0.03).toFixed(2)}€
                 &nbsp;·&nbsp; 0 appel Claude supplémentaire
               </div>
-              {busy && status && <p style={{textAlign:"center",fontSize:12,color:"#1d4ed8",marginBottom:8}}>⏳ {status}</p>}
+              {busy && progress && (
+                <div style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"#6b7280",marginBottom:4}}>
+                    <span>📬 {progress.label}…</span>
+                    <span>{progress.current}/{progress.total}</span>
+                  </div>
+                  <div style={{background:"#e5e7eb",borderRadius:999,height:6}}>
+                    <div style={{background:"#1d4ed8",borderRadius:999,height:6,width:(progress.current/progress.total*100)+"%",transition:"width 0.3s"}}/>
+                  </div>
+                </div>
+              )}
+              {busy && status && !progress && <p style={{textAlign:"center",fontSize:12,color:"#1d4ed8",marginBottom:8}}>⏳ {status}</p>}
               <button disabled={busy} onClick={sendResults} style={{width:"100%",marginTop:4}}>
                 {"📬 Envoyer à " + validCorrs.filter(function(c){return !!c.email;}).length + " élève" + (validCorrs.filter(function(c){return !!c.email;}).length>1?"s":"")}
               </button>
