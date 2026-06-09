@@ -151,8 +151,19 @@ async function callClaude(key, messages, system) {
 function latexToHtml(src) {
   if (!window.katex || !src) return "<pre style=\"white-space:pre-wrap\">" + (src || "") + "</pre>";
   function rk(m, disp) {
-    try { return window.katex.renderToString(m.trim(), { displayMode: disp, throwOnError: false }); }
-    catch(e) { return m; }
+    try {
+      return window.katex.renderToString(m.trim(), {
+        displayMode: disp, throwOnError: true, output: "html"
+      });
+    } catch(e) {
+      var clean = m.replace(/\\[a-zA-Z]+\{[^}]*\}/g," ")
+                   .replace(/\\[a-zA-Z]+/g," ")
+                   .replace(/[{}$&\\]/g," ")
+                   .replace(/\s+/g," ").trim();
+      return disp
+        ? '<div style=\"margin:8px 0;text-align:center;color:#555;font-style:italic\">'+clean+'</div>'
+        : '<span style=\"color:#555\">'+clean+'</span>';
+    }
   }
   // Regex définies en variables — évite toute confusion d'échappement
   var RE1 = /\\\[([\s\S]+?)\\\]/g;   // \[...\] display
@@ -362,6 +373,7 @@ function Devoir({ sid, sname, onBack }) {
   var [mailsDone,   setMailsDoneR]   = useState(function() { return ld("mailsDone",false); });
   function setMailsDone(v) { setMailsDoneR(v); ps("mailsDone",v); }
   var [resending,   setResending]    = useState(null);
+  var [corrRefLoading, setCorrRefLoading] = useState(false);
   var [progress,    setProgress]     = useState(null); // {current, total, label}
   var corrImgRef = useRef(null);
   // Invalider le cache image si on recommence une correction
@@ -424,6 +436,7 @@ function Devoir({ sid, sname, onBack }) {
       setCopies(function(prev) { return prev.concat([{ name: fname, b64: b64 }]); });
       if (!namesExtracted.current) { namesExtracted.current = true; extractNames(b64); }
     }
+    if (!corrRef && !corrRefLoading) buildCorrRef();
   }
 
   /* ── Générer sujet LaTeX ── */
@@ -510,7 +523,14 @@ function Devoir({ sid, sname, onBack }) {
 
     // Attendre que les polices KaTeX soient chargées (crucial pour le rendu)
     await document.fonts.ready;
-    await new Promise(function(r) { setTimeout(r, 1500); });
+    try {
+      await Promise.all([
+        document.fonts.load("1em KaTeX_Main"),
+        document.fonts.load("1em KaTeX_Math"),
+        document.fonts.load("1em KaTeX_Size1")
+      ]);
+    } catch(e) { /* polices non critiques */ }
+    await new Promise(function(r) { setTimeout(r, 2000); });
 
     await loadH2C();
     var canvas = await window.html2canvas(div, {
@@ -523,48 +543,116 @@ function Devoir({ sid, sname, onBack }) {
     return img;
   }
 
+  /* ── pdf-lib chargé dynamiquement ── */
+  function loadPdfLib() {
+    return new Promise(function(res,rej){
+      if(window.PDFLib){res(window.PDFLib);return;}
+      var s=document.createElement("script");
+      s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
+      s.onload=function(){res(window.PDFLib);}; s.onerror=rej;
+      document.head.appendChild(s);
+    });
+  }
+
+  /* ── Phase 1 : repérage pages (1 requête légère) ── */
+  async function detectPageRanges(pdfB64, names) {
+    var raw = await callClaude(apiKey,[{role:"user",content:[
+      {type:"document",source:{type:"base64",media_type:"application/pdf",data:pdfB64}},
+      {type:"text",text:"Élèves :\n"+names.join("\n")+
+        "\n\nDis-moi à quelle page commence et finit chaque copie."+
+        "\nJSON uniquement :\n[{\"name\":\"Prenom Nom\",\"pageStart\":1,\"pageEnd\":2}]"}
+    ]}],"Analyse PDF. JSON uniquement, compact.");
+    return JSON.parse(raw.replace(/```json|```/g,"").trim());
+  }
+
+  /* ── Phase 2 : découpage local (aucune requête) ── */
+  async function extractStudentPdf(PDFLib,fullB64,pageStart,pageEnd){
+    var src=new Uint8Array(atob(fullB64).split("").map(function(c){return c.charCodeAt(0);}));
+    var srcDoc=await PDFLib.PDFDocument.load(src);
+    var newDoc=await PDFLib.PDFDocument.create();
+    var idx=[];for(var i=pageStart-1;i<pageEnd;i++)idx.push(i);
+    var pages=await newDoc.copyPages(srcDoc,idx);
+    pages.forEach(function(p){newDoc.addPage(p);});
+    var bytes=await newDoc.save();
+    var bin="",chunk=8192;
+    for(var j=0;j<bytes.length;j+=chunk)
+      bin+=String.fromCharCode.apply(null,bytes.subarray(j,j+chunk));
+    return btoa(bin);
+  }
+
+  /* ── Phase 3 : correction individuelle (PDF 2 pages) ── */
+  async function correctOnePdf(studentB64,name){
+    var blocks=[];
+    if(upSubPdf) blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+    blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:studentB64}});
+    blocks.push({type:"text",text:
+      "Élève : "+name+"\nCorrige UNIQUEMENT cette copie. Copies possiblement manuscrites — bénéfice du doute.\n"+
+      "JSON uniquement (1 objet) :\n{\"name\":\""+name+"\",\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}"
+    });
+    var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
+    var p=JSON.parse(raw.replace(/```json|```/g,"").trim());
+    return Array.isArray(p)?p[0]:p;
+  }
+
+  /* ── Fallback : correction par lots ── */
+  async function correctByLots(copyList){
+    var results=[],LOT_SIZE=10,totalLots=Math.ceil(copyList.length/LOT_SIZE);
+    for(var lot=0;lot<totalLots;lot++){
+      var lotS=lot*LOT_SIZE,lotE=Math.min(lotS+LOT_SIZE,copyList.length);
+      if(totalLots>1) setStatus("Lot "+(lot+1)+"/"+totalLots+" — copies "+(lotS+1)+" à "+lotE+"…");
+      for(var i=lotS;i<lotE;i++){
+        setStatus("Correction "+(i+1)+"/"+copyList.length+"…");
+        var blocks=[];
+        if(upSubPdf) blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+        blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:copyList[i].b64}});
+        blocks.push({type:"text",text:
+          "Copies :\n"+parsedStudents.map(function(s){return "- "+s.name;}).join("\n")+
+          "\n\nSUJET (voir PDF joint)\nCopies possiblement manuscrites. Bénéfice du doute.\n"+
+          "Identifie chaque copie et ses pages (depuis 1).\n"+
+          "JSON uniquement :\n[{\"name\":\"Prenom\",\"pageStart\":1,\"pageEnd\":2,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
+        });
+        var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
+        results=results.concat(JSON.parse(raw.replace(/```json|```/g,"").trim()));
+      }
+    }
+    return results;
+  }
+
   /* ── Correction depuis PDF ── */
   async function correctFromPdf() {
-    if (!copies.length || !apiKey) return;
+    if(!copies.length||!apiKey)return;
     setBusy(true);
     try {
-      var allResults = [];
-      var LOT_SIZE = 10;
-      var totalLots = Math.ceil(copies.length / LOT_SIZE);
-      for (var lot = 0; lot < totalLots; lot++) {
-        var lotStart = lot * LOT_SIZE;
-        var lotEnd   = Math.min(lotStart + LOT_SIZE, copies.length);
-        if (totalLots > 1) {
-          setStatus("Lot " + (lot+1) + "/" + totalLots + " — copies " + (lotStart+1) + " à " + lotEnd + "…");
-        }
-        for (var i = lotStart; i < lotEnd; i++) {
-          setStatus("Correction PDF " + (i+1) + "/" + copies.length + "…");
-          var blocks = [];
-          if (upSubPdf) {
-            blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
-          }
-          blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:copies[i].b64 } });
-          blocks.push({ type:"text", text:
-            "Copies des eleves :\n" + parsedStudents.map(function(s){return "- "+s.name;}).join("\n") +
-            "\n\nSUJET (voir PDF joint)" +
-            "\n\nLes copies peuvent etre manuscrites. Si l'ecriture est difficile, deduis du contexte et accorde le benefice du doute.\n" +
-            "Identifie chaque copie, ses pages dans CE PDF (numerotees depuis 1), corrige-la.\n" +
-            "JSON uniquement :\n[{\"name\":\"Prenom Nom\",\"pageStart\":1,\"pageEnd\":2,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
-          });
-          var raw = await callClaude(apiKey, [{ role:"user", content:blocks }], corrPrompt);
-          var arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
-          allResults = allResults.concat(arr);
-        }
-      }
-      setCorrections(parsedStudents.map(function(s) {
-        var found = allResults.find(function(r) {
-          return r.name && r.name.toLowerCase().includes(s.name.split(" ")[0].toLowerCase());
-        });
-        return found ? Object.assign({}, s, found) : Object.assign({}, s, { skipped:true });
+      var allResults=[];
+      if(copies.length===1){
+        setStatus("Repérage des copies dans le PDF…");
+        var pageRanges=null;
+        try{ pageRanges=await detectPageRanges(copies[0].b64,parsedStudents.map(function(s){return s.name;})); }
+        catch(e){ console.warn("Repérage échoué:",e); }
+        if(pageRanges&&pageRanges.length>0){
+          var PDFLib=null;
+          try{ PDFLib=await loadPdfLib(); }catch(e){ console.warn("pdf-lib indispo:",e); }
+          if(PDFLib){
+            for(var i=0;i<pageRanges.length;i++){
+              var pr=pageRanges[i];
+              setProgress({current:i+1,total:pageRanges.length,label:pr.name.split(" ")[0]});
+              try{
+                var sp=await extractStudentPdf(PDFLib,copies[0].b64,pr.pageStart,pr.pageEnd);
+                var r=await correctOnePdf(sp,pr.name);
+                if(r)allResults.push(r);
+              }catch(e){ console.warn("Erreur "+pr.name,e); }
+            }
+            setProgress(null);
+          } else { allResults=await correctByLots(copies); }
+        } else { allResults=await correctByLots(copies); }
+      } else { allResults=await correctByLots(copies); }
+      setCorrections(parsedStudents.map(function(s){
+        var found=allResults.find(function(r){return r.name&&r.name.toLowerCase().includes(s.name.split(" ")[0].toLowerCase());});
+        return found?Object.assign({},s,found):Object.assign({},s,{skipped:true});
       }));
-    } catch(e) { setStatus("❌ " + e.message); console.error("correctFromPdf:", e); }
-    finally { setBusy(false); }
-    await buildCorrRef();
+    }catch(e){setStatus("❌ "+e.message);console.error("correctFromPdf:",e);}
+    finally{setBusy(false);setProgress(null);}
+    if(!corrRef)await buildCorrRef();
   }
 
   /* ── Correction manuelle ── */
@@ -630,28 +718,30 @@ function Devoir({ sid, sname, onBack }) {
 
   /* ── Générer le corrigé LaTeX depuis le sujet PDF (1 seul appel) ── */
   async function buildCorrRef() {
-    if (corrRef) return;
-    if (!apiKey) return;
+    if (corrRef || corrRefLoading) return;
+    if (!apiKey || !upSubPdf) return;
+    setCorrRefLoading(true);
     setStatus("Génération du corrigé en LaTeX…");
     try {
-      var blocks = [];
-      if (upSubPdf) {
-        blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
-      }
-      var prompt = "Génère le corrigé complet de cet examen en LaTeX."
-        + " Retourne UNIQUEMENT le contenu LaTeX (sans \\documentclass ni \\begin{document}),"
-        + " exercice par exercice, avec toutes les formules en LaTeX ($...$ ou $$...$$)."
-        + " Format : \\section*{Corrigé Exercice 1}\\n\\begin{enumerate}\\n  \\item solution avec $formule$\\n\\end{enumerate}";
-      blocks.push({ type:"text", text: prompt });
+      var sysPrompt = "Professeur de maths lycée. RÈGLES STRICTES :"
+        + " 1) Formules display : $$formule$$ (JAMAIS \\[ \\] ni \\begin{equation} seul)."
+        + " 2) Formules inline : $formule$."
+        + " 3) Tableaux : $$\\begin{array}{...}...\\end{array}$$."
+        + " 4) Structure : \\section*{titre} \\begin{enumerate} \\item."
+        + " Retourne UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass).";
       var raw = await callClaude(apiKey,
-        [{ role:"user", content:blocks }],
-        "Professeur de maths lycée. LaTeX rigoureux. Retourne uniquement le contenu LaTeX du corrigé."
+        [{ role:"user", content:[
+          { type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } },
+          { type:"text", text:"Génère le corrigé complet et détaillé en LaTeX. Exercice par exercice, toutes les étapes, toutes les formules." }
+        ]}],
+        sysPrompt
       );
       setCorrRef(raw.trim());
       corrImgRef.current = null;
     } catch(e) { console.warn("buildCorrRef:", e); }
-    setStatus("");
+    finally { setCorrRefLoading(false); setStatus(""); }
   }
+
 
   /* ── Construire le HTML d'un mail élève ── */
   function buildMailHtml(cor, corrImg) {
@@ -898,6 +988,26 @@ function Devoir({ sid, sname, onBack }) {
             </Card>
           )}
 
+          {/* Corrigé éditable */}
+          {corrections.length === 0 && (
+            <Card>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <span style={{fontSize:14,fontWeight:500}}>📐 Corrigé et barème</span>
+                {corrRefLoading && <span style={{fontSize:12,color:"#1d4ed8"}}>⏳ Génération…</span>}
+                {!corrRefLoading&&corrRef && <span style={{fontSize:11,color:"#16a34a"}}>✓ Prêt</span>}
+              </div>
+              {corrRefLoading && <p style={{fontSize:12,color:"#6b7280",textAlign:"center"}}>Génération du corrigé depuis le sujet PDF…</p>}
+              {!corrRefLoading&&corrRef && (
+                <div>
+                  <p style={{fontSize:11,color:"#6b7280",marginBottom:6}}>Modifiez si besoin avant de corriger :</p>
+                  <textarea value={corrRef} onChange={function(e){setCorrRef(e.target.value);corrImgRef.current=null;}}
+                    style={{width:"100%",minHeight:180,fontFamily:"monospace",fontSize:11,lineHeight:1.5}}/>
+                </div>
+              )}
+              {!corrRefLoading&&!corrRef && <p style={{fontSize:12,color:"#9ca3af",fontStyle:"italic"}}>Le corrigé sera généré automatiquement une fois les copies chargées.</p>}
+            </Card>
+          )}
+
           {/* Zone upload copies */}
           {corrections.length === 0 && (
             <Card>
@@ -926,7 +1036,7 @@ function Devoir({ sid, sname, onBack }) {
               )}
               {copies.length > 0 && (
                 <div>
-                  <button disabled={busy||!apiKey} onClick={correctFromPdf} style={{width:"100%",marginBottom:6}}>
+                  <button disabled={busy||!apiKey||corrRefLoading} onClick={correctFromPdf} style={{width:"100%",marginBottom:6}}>
                     {busy ? status : "🤖 Corriger depuis les PDFs ↗"}
                   </button>
                   {busy && status && (
@@ -1116,7 +1226,7 @@ function Devoir({ sid, sname, onBack }) {
                 </div>
               )}
               {busy && status && !progress && <p style={{textAlign:"center",fontSize:12,color:"#1d4ed8",marginBottom:8}}>⏳ {status}</p>}
-              <button disabled={busy} onClick={sendResults} style={{width:"100%",marginTop:4}}>
+              <button disabled={busy||corrRefLoading} onClick={sendResults} style={{width:"100%",marginTop:4}}>
                 {"📬 Envoyer à " + validCorrs.filter(function(c){return !!c.email;}).length + " élève" + (validCorrs.filter(function(c){return !!c.email;}).length>1?"s":"")}
               </button>
             </div>
