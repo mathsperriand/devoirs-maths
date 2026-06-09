@@ -333,8 +333,8 @@ function Devoir({ sid, sname, onBack }) {
   var previewRef = useRef(null);
 
   // Étape 0 – Sujet
-  var [subjectMode, setSubjectModeR] = useState(function() { return ld("subjectMode","generate"); });
-  function setSubjectMode(v) { setSubjectModeR(v); ps("subjectMode",v); }
+  // Mode toujours "upload"
+  var subjectMode = "upload";
   var [consignes,   setConsignesR]   = useState(function() { return ld("consignes",""); });
   function setConsignes(v) { setConsignesR(v); ps("consignes",v); }
   var [latex,       setLatexR]       = useState(function() { return ld("latex",""); });
@@ -380,7 +380,7 @@ function Devoir({ sid, sname, onBack }) {
     .reduce(function(a, c, _, arr) { return a + (+c.note) / arr.length; }, 0);
 
   var canNext = [
-    subjectMode === "generate" ? !!latex : !!upSubPdf,
+    !!upSubPdf,
     true,
     corrections.length > 0,
     true
@@ -693,12 +693,12 @@ function Devoir({ sid, sname, onBack }) {
     try {
       var b64 = await readFile(file);
       var blocks = [];
-      if (subjectMode === "upload" && upSubPdf) {
+      if (upSubPdf) {
         blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
       }
       blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } });
       blocks.push({ type:"text", text:
-        "Corrige cette copie en retard.\nSUJET" + (subjectMode==="upload" ? " (voir PDF joint)" : ":\n" + latex) +
+        "Corrige cette copie en retard.\nSUJET" + (" (voir PDF joint)" + latex) +
         "\nCORRIGÉ:\n" + (corrRef || "[utilise tes connaissances]") +
         "\nJSON uniquement :\n[{\"name\":\"Prénom Nom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
       });
@@ -895,97 +895,33 @@ function Devoir({ sid, sname, onBack }) {
         })}
       </div>
 
-      {/* ═══ STEP 0 : Sujet ═══ */}
+      {/* ═══ STEP 0 : Sujet PDF ═══ */}
       {step === 0 && (
-        <div>
-          <div style={{display:"flex",gap:8,marginBottom:16}}>
-            {[["generate","✨ Générer avec l'IA"],["upload","📂 J'ai déjà un sujet (PDF)"]].map(function(pair) {
-              var m = pair[0], lbl = pair[1];
-              return (
-                <button key={m} onClick={function(){setSubjectMode(m);}} style={{
-                  flex:1,padding:"10px 0",fontSize:13,fontWeight:500,
-                  background:subjectMode===m?"#1d4ed8":"#f3f4f6",
-                  color:subjectMode===m?"#fff":"#6b7280",
-                  border:subjectMode===m?"none":"0.5px solid #e5e7eb",borderRadius:8
-                }}>{lbl}</button>
-              );
-            })}
-          </div>
-
-          {subjectMode === "generate" && (
-            <div>
-              <Card>
-                <Field label="Vos consignes pour le sujet">
-                  <textarea value={consignes} onChange={function(e){setConsignes(e.target.value);}}
-                    placeholder="Ex : Devoir de Terminale sur les suites, 3 exercices progressifs…"
-                    style={{minHeight:130,lineHeight:1.6}}/>
-                </Field>
-                <button disabled={busy||!consignes.trim()||!apiKey} onClick={generateSubject} style={{width:"100%",marginTop:8}}>
-                  {busy ? status : "✨ Générer le sujet"}
-                </button>
-              </Card>
-              {latex && (
-                <div>
-                  <Card>
-                    <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>Aperçu du sujet</div>
-                    <div ref={previewRef} style={{background:"#fff",color:"#111",padding:"28px 32px",border:"0.5px solid #e5e7eb",borderRadius:6,lineHeight:1.8,fontSize:13}}
-                      dangerouslySetInnerHTML={{__html:latexToHtml(latex)}}/>
-                  </Card>
-                  <Card>
-                    <div style={{fontSize:14,fontWeight:500,marginBottom:8}}>Source LaTeX — modifiable</div>
-                    <textarea value={latex} onChange={function(e){setLatex(e.target.value);}}
-                      style={{minHeight:180,fontFamily:"monospace",fontSize:11.5}}/>
-                  </Card>
-                </div>
-              )}
-            </div>
-          )}
-
-          {subjectMode === "upload" && (
-            <Card>
-              <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>Votre sujet en PDF</div>
-              <DropZone id="subj-pdf" multiple={false} loaded={!!upSubPdf} name={upSubName}
-                onFiles={async function(files) {
-                  var f = files[0];
-                  if (!f) return;
-                  setUpSubName(f.name);
-                  setUpSubPdf(await readFile(f));
-                }}
-                label="Glissez le PDF ici ou cliquez" sub=""/>
-            </Card>
-          )}
-        </div>
+        <Card>
+          <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>📄 Votre sujet en PDF</div>
+          <DropZone id="subj-pdf" multiple={false} loaded={!!upSubPdf} name={upSubName}
+            onFiles={async function(files) {
+              var f = files[0]; if (!f) return;
+              setUpSubName(f.name); setUpSubPdf(await readFile(f));
+            }}
+            label="Glissez le PDF du sujet ici ou cliquez"
+            sub="Le sujet sera transmis à l'IA pour corriger les copies"/>
+          {upSubPdf && <p style={{fontSize:12,color:"#16a34a",marginTop:8}}>✓ Sujet chargé — passez à l'étape suivante.</p>}
+        </Card>
       )}
 
-      {/* ═══ STEP 1 : Diffusion ═══ */}
+            {/* ═══ STEP 1 : Diffusion ═══ */}
       {step === 1 && (
         <div>
-          {subjectMode === "generate" && (
-            <Card>
-              <p style={{fontSize:13,color:"#6b7280",marginBottom:12}}>Téléchargez le PDF du sujet pour le déposer dans Pronote.</p>
-              <button disabled={busy} onClick={downloadSubjectPdf} style={{width:"100%"}}>
-                {busy ? status : "📥 Télécharger le sujet en PDF"}
-              </button>
-            </Card>
-          )}
-          {subjectMode === "upload" && (
-            <Card>
-              <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:20}}>✓</span>
-                <div>
-                  <div style={{fontSize:14,fontWeight:500}}>Sujet chargé : {upSubName}</div>
-                  <div style={{fontSize:12,color:"#6b7280"}}>Utilisé par l'IA à l'étape Correction.</div>
-                </div>
+          <Card>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>✓</span>
+              <div>
+                <div style={{fontSize:14,fontWeight:500}}>Sujet : {upSubName}</div>
+                <div style={{fontSize:12,color:"#6b7280"}}>Transmis à l'IA pour la correction des copies.</div>
               </div>
-            </Card>
-          )}
-          {subjectMode === "generate" && latex && (
-            <Card>
-              <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>Aperçu</div>
-              <div style={{background:"#fff",color:"#111",padding:"24px 28px",border:"0.5px solid #e5e7eb",borderRadius:6,lineHeight:1.8,fontSize:13}}
-                dangerouslySetInnerHTML={{__html:latexToHtml(latex)}}/>
-            </Card>
-          )}
+            </div>
+          </Card>
           <Card>
             <div style={{fontSize:14,fontWeight:500,marginBottom:10}}>👥 Liste des élèves</div>
             <DropZone id="copies-step1" multiple={true}
@@ -993,7 +929,7 @@ function Devoir({ sid, sname, onBack }) {
               name={copies.map(function(c){return c.name;}).join(", ")}
               onFiles={addCopies}
               label="📄 Déposez le(s) PDF des copies pour extraire les noms automatiquement"
-              sub="(le PDF sera réutilisé à l'étape Correction)"/>
+              sub="(réutilisé à l'étape Correction)"/>
             {extracting && <p style={{fontSize:12,color:"#1d4ed8",marginBottom:8,textAlign:"center"}}>🔍 Extraction des noms…</p>}
             <Field label={copies.length > 0 ? "Noms extraits — vérifiez et complétez les emails" : "Ou saisissez manuellement — Nom Prénom, email"}>
               <textarea value={students} onChange={function(e){setStudents(e.target.value);}}
@@ -1004,7 +940,7 @@ function Devoir({ sid, sname, onBack }) {
         </div>
       )}
 
-      {/* ═══ STEP 2 : Correction ═══ */}
+            {/* ═══ STEP 2 : Correction ═══ */}
       {step === 2 && (
         <div>
                     {/* Aperçu corrigé KaTeX */}
