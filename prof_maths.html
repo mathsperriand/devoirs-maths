@@ -210,7 +210,7 @@ LECTURE : Si copie manuscrite/ambiguë → champ "transcription" décrivant l'in
 
 NOTATION : valorise démarche (méthode correcte + erreur calcul = majorité des points) ; valorise débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
 
-RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Français uniquement, pas de LaTeX dans appreciation/remarque/conseil.
+RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Dans appreciation et conseil : français courant, pas de LaTeX. Dans remarque : utilise le LaTeX ($...$ inline, $$...$$ display) pour toutes les formules mathématiques.
 
 FORMAT : JSON valide uniquement, sans \`\`\`json.
 [{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
@@ -740,7 +740,7 @@ function Devoir({ sid, sname, onBack }) {
     var detRows = (cor.details || []).map(function(d) {
       return "<tr><td style=\"padding:5px 8px;color:#555;border-top:1px solid #e5e7eb\">" + d.exercice + "</td>"
         + "<td style=\"padding:5px 8px;font-weight:600;border-top:1px solid #e5e7eb;white-space:nowrap\">" + d.obtenu + "/" + d.sur + "</td>"
-        + "<td style=\"padding:5px 8px;color:#444;border-top:1px solid #e5e7eb\">" + (d.remarque||"") + "</td></tr>";
+        + "<td style=\"padding:5px 8px;color:#444;border-top:1px solid #e5e7eb\">" + latexToHtml(d.remarque||"") + "</td></tr>";
     }).join("");
     var corrHtml = corrRefLatex ? latexToHtml(corrRefLatex) : "";
     return "<div style=\"font-family:Georgia,serif;max-width:640px;margin:0 auto;padding:24px;color:#111\">"
@@ -1059,6 +1059,14 @@ function Devoir({ sid, sname, onBack }) {
           {/* Résultats de correction */}
           {corrections.length > 0 && (
             <div>
+              {/* Corrigé général — affiché une seule fois */}
+              {corrRef && (
+                <Card style={{marginBottom:12}}>
+                  <div style={{fontSize:13,fontWeight:500,color:"#374151",marginBottom:10}}>📐 Corrigé du sujet</div>
+                  <div style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"16px 18px",lineHeight:1.8,fontSize:13,maxHeight:400,overflowY:"auto"}}
+                    dangerouslySetInnerHTML={{__html:latexToHtml(corrRef)}}/>
+                </Card>
+              )}
               {parsedStudents.map(function(s) {
                 var c = corrections.find(function(x){return x.id===s.id;});
                 var nc = c && !isNaN(+c.note) ? (+c.note>=10?"#16a34a":"#dc2626") : "#111";
@@ -1093,14 +1101,6 @@ function Devoir({ sid, sname, onBack }) {
                           );
                         })}
                         <p style={{fontSize:12,color:"#6b7280",fontStyle:"italic",margin:"8px 0 0"}}>💡 {c.conseil}</p>
-                        {/* Corrigé général en KaTeX */}
-                        {corrRef && (
-                          <div style={{marginTop:14,borderTop:"1px solid #e5e7eb",paddingTop:12}}>
-                            <div style={{fontSize:12,fontWeight:500,color:"#374151",marginBottom:8}}>📐 Corrigé du sujet</div>
-                            <div style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"16px 18px",lineHeight:1.8,fontSize:13,maxHeight:350,overflowY:"auto"}}
-                              dangerouslySetInnerHTML={{__html:latexToHtml(corrRef)}}/>
-                          </div>
-                        )}
                       </div>
                     ) : (
                       <p style={{fontSize:13,color:"#9ca3af",fontStyle:"italic"}}>Copie non trouvée dans le PDF</p>
