@@ -202,16 +202,18 @@ function latexToHtml(src) {
 }
 
 /* ══ Prompt de correction adaptatif (manuscrit + tapé, pleine qualité) ══ */
-const DEFAULT_PROMPT = `Tu es un correcteur de mathématiques expert, pédagogue et profondément bienveillant. Le PDF peut contenir des copies manuscrites, tapées, ou les deux.
+const DEFAULT_CORR_SYS = "Professeur de maths lycée. Formules display : $$formule$$. Inline : $formule$. Tableaux : $$\\begin{array}{...}...\\end{array}$$. Structure : \\section*{titre} \\begin{enumerate} \\item. Retourne UNIQUEMENT le LaTeX du corrigé (sans \\documentclass).";
 
-LECTURE ADAPTATIVE : Si une réponse est manuscrite ou contient des éléments ambigus (symbole douteux, rature, écriture difficile), remplis le champ "transcription" en décrivant ce que tu lis et comment tu l'interprètes. Pour les parties tapées et clairement lisibles, omets ce champ ou écris null. Règles de déduction : symbole ambigu → regarde la ligne suivante pour déduire l'intention ; résultat final correct → raisonne à rebours (la démarche était correcte) ; rature suivie d'une correction → compétence à valoriser, pas à sanctionner ; bénéfice du doute systématique.
+const DEFAULT_PROMPT = `Correcteur maths lycée, pédagogue et bienveillant.
 
-NOTATION : valorise la démarche (méthode correcte avec erreur de calcul = majorité des points) ; valorise les débuts de recherche, schémas, formules même sans aboutir ; jamais 0/20 ; indulgent sur la rédaction, exigeant sur la logique.
+LECTURE : Si copie manuscrite/ambiguë → champ "transcription" décrivant l'interprétation ; sinon null. Symbole ambigu → contexte suivant ; résultat correct → démarche valorisée ; rature+correction → compétence. Bénéfice du doute systématique.
 
-RÉDACTION : tutoie l'élève (prénom seul, sans nom) ; méthode sandwich (point positif fort → critique constructive → encouragement chaleureux) ; conseil concret et ciblé (ex : "Entraîne-toi à factoriser..."). Français courant uniquement — pas de LaTeX dans appreciation, remarque ni conseil.
+NOTATION : valorise démarche (méthode correcte + erreur calcul = majorité des points) ; valorise débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
 
-FORMAT : JSON valide uniquement, sans introduction, sans conclusion, sans \`\`\`json.
-[{"name":"Prénom Nom","note":14,"appreciation":"Texte bienveillant et détaillé...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"Explication précise de la note..."}],"conseil":"Action concrète et ciblée..."}]`;
+RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Français uniquement, pas de LaTeX dans appreciation/remarque/conseil.
+
+FORMAT : JSON valide uniquement, sans \`\`\`json.
+[{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
 
 /* ══ Micro-composants ═════════════════════════════════════════════ */
 function Card({ children, style }) {
@@ -364,6 +366,8 @@ function Devoir({ sid, sname, onBack }) {
   var [corrPrompt,  setCorrPromptR]  = useState(function() { return ld("corrPrompt", DEFAULT_PROMPT); });
   function setCorrPrompt(v) { setCorrPromptR(v); ps("corrPrompt",v); }
   var [showPrompt,  setShowPrompt]   = useState(false);
+  var [corrEditInstr, setCorrEditInstr] = useState("");
+  var [corrEditBusy, setCorrEditBusy] = useState(false);
   var [answers,     setAnswersR]     = useState(function() { return ld("answers",{}); });
   function setAnswers(v) { setAnswersR(v); ps("answers",v); }
   var [corrections, setCorrectionsR] = useState(function() { return ld("corrections",[]); });
@@ -375,11 +379,9 @@ function Devoir({ sid, sname, onBack }) {
   var [resending,   setResending]    = useState(null);
   var [corrRefLoading, setCorrRefLoading] = useState(false);
   var [progress,    setProgress]     = useState(null); // {current, total, label}
-  var corrImgRef = useRef(null);
   // Invalider le cache image si on recommence une correction
   function resetCorrections() {
     setCorrections([]);
-    corrImgRef.current = null;
   }
 
   // Dérivés
@@ -498,51 +500,6 @@ function Devoir({ sid, sname, onBack }) {
     finally { setBusy(false); }
   }
 
-  /* ── Construire l'image du corrigé (KaTeX → html2canvas, mise en cache) ── */
-  async function buildCorrImage() {
-    if (corrImgRef.current) return corrImgRef.current;
-
-    // Source 1 : corrRef LaTeX complet (généré avec le sujet)
-    // Source 2 : résumé des détails de correction
-    // Source 3 : null → pas d'image
-    var src = corrRef;
-    if (!src && validCorrs.length > 0) {
-      var details = validCorrs[0].details || [];
-      if (details.length > 0) {
-        src = details.map(function(d) {
-          return "\\section*{" + d.exercice + "}\n" + d.remarque;
-        }).join("\n\n");
-      }
-    }
-    if (!src) return null;
-
-    var div = document.createElement("div");
-    div.style.cssText = "position:fixed;left:-9999px;top:0;width:640px;background:#fff;padding:36px;font-family:Georgia,serif;color:#111;line-height:1.7;font-size:12pt";
-    div.innerHTML = "<h2 style=\"font-size:14pt;margin-bottom:16px;border-bottom:1px solid #ccc;padding-bottom:8px\">📝 Corrigé</h2>" + latexToHtml(src);
-    document.body.appendChild(div);
-
-    // Attendre que les polices KaTeX soient chargées (crucial pour le rendu)
-    await document.fonts.ready;
-    try {
-      await Promise.all([
-        document.fonts.load("1em KaTeX_Main"),
-        document.fonts.load("1em KaTeX_Math"),
-        document.fonts.load("1em KaTeX_Size1")
-      ]);
-    } catch(e) { /* polices non critiques */ }
-    await new Promise(function(r) { setTimeout(r, 2000); });
-
-    await loadH2C();
-    var canvas = await window.html2canvas(div, {
-      scale: 1.5, useCORS: true, backgroundColor: "#ffffff", logging: false
-    });
-    document.body.removeChild(div);
-
-    var img = canvas.toDataURL("image/jpeg", 0.82);
-    corrImgRef.current = img;
-    return img;
-  }
-
   /* ── pdf-lib chargé dynamiquement ── */
   function loadPdfLib() {
     return new Promise(function(res,rej){
@@ -581,21 +538,23 @@ function Devoir({ sid, sname, onBack }) {
   }
 
   /* ── Phase 3 : correction individuelle (PDF 2 pages) ── */
-  async function correctOnePdf(studentB64,name){
+  async function correctOnePdf(studentB64,name,corrRefText){
     var blocks=[];
-    if(upSubPdf) blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+    // Si on a le corrigé en texte, on l'envoie à la place du PDF sujet (économie tokens majeure)
+    if(corrRefText){
+      blocks.push({type:"text",text:"CORRIGÉ DE RÉFÉRENCE (barème) :\n"+corrRefText});
+    } else if(upSubPdf){
+      blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+    }
     blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:studentB64}});
-    blocks.push({type:"text",text:
-      "Élève : "+name+"\nCorrige UNIQUEMENT cette copie. Copies possiblement manuscrites — bénéfice du doute.\n"+
-      "JSON uniquement (1 objet) :\n{\"name\":\""+name+"\",\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}"
-    });
+    blocks.push({type:"text",text:"Élève : "+name+". Corrige UNIQUEMENT cette copie. 1 objet JSON."});
     var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
     var p=JSON.parse(raw.replace(/```json|```/g,"").trim());
     return Array.isArray(p)?p[0]:p;
   }
 
   /* ── Fallback : correction par lots ── */
-  async function correctByLots(copyList){
+  async function correctByLots(copyList,corrRefText){
     var results=[],LOT_SIZE=10,totalLots=Math.ceil(copyList.length/LOT_SIZE);
     for(var lot=0;lot<totalLots;lot++){
       var lotS=lot*LOT_SIZE,lotE=Math.min(lotS+LOT_SIZE,copyList.length);
@@ -603,13 +562,15 @@ function Devoir({ sid, sname, onBack }) {
       for(var i=lotS;i<lotE;i++){
         setStatus("Correction "+(i+1)+"/"+copyList.length+"…");
         var blocks=[];
-        if(upSubPdf) blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+        if(corrRefText){
+          blocks.push({type:"text",text:"CORRIGÉ DE RÉFÉRENCE :\n"+corrRefText});
+        } else if(upSubPdf){
+          blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}});
+        }
         blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:copyList[i].b64}});
         blocks.push({type:"text",text:
-          "Copies :\n"+parsedStudents.map(function(s){return "- "+s.name;}).join("\n")+
-          "\n\nSUJET (voir PDF joint)\nCopies possiblement manuscrites. Bénéfice du doute.\n"+
-          "Identifie chaque copie et ses pages (depuis 1).\n"+
-          "JSON uniquement :\n[{\"name\":\"Prenom\",\"pageStart\":1,\"pageEnd\":2,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"transcription\":null,\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
+          "Copies attendues :\n"+parsedStudents.map(function(s){return "- "+s.name;}).join("\n")+
+          "\nIdentifie la copie et ses pages. JSON uniquement."
         });
         var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
         results=results.concat(JSON.parse(raw.replace(/```json|```/g,"").trim()));
@@ -623,6 +584,23 @@ function Devoir({ sid, sname, onBack }) {
     if(!copies.length||!apiKey)return;
     setBusy(true);
     try {
+      // Étape 0 : générer le corrigé de référence EN PREMIER (évite d'envoyer le PDF sujet à chaque copie)
+      var activeCorrRef = corrRef;
+      if(!activeCorrRef && upSubPdf){
+        setStatus("Génération du corrigé de référence (1 seul appel)…");
+        try{
+          var sysR = await callClaude(apiKey,
+            [{role:"user",content:[
+              {type:"document",source:{type:"base64",media_type:"application/pdf",data:upSubPdf}},
+              {type:"text",text:"Génère le corrigé complet et détaillé en LaTeX. Exercice par exercice, toutes les étapes, toutes les formules."}
+            ]}],
+            DEFAULT_CORR_SYS
+          );
+          activeCorrRef = sysR.trim();
+          setCorrRef(activeCorrRef);
+        }catch(e){ console.warn("Corrigé ref échoué, on continue sans:",e); }
+      }
+
       var allResults=[];
       if(copies.length===1){
         setStatus("Repérage des copies dans le PDF…");
@@ -638,21 +616,20 @@ function Devoir({ sid, sname, onBack }) {
               setProgress({current:i+1,total:pageRanges.length,label:pr.name.split(" ")[0]});
               try{
                 var sp=await extractStudentPdf(PDFLib,copies[0].b64,pr.pageStart,pr.pageEnd);
-                var r=await correctOnePdf(sp,pr.name);
+                var r=await correctOnePdf(sp,pr.name,activeCorrRef);
                 if(r)allResults.push(r);
               }catch(e){ console.warn("Erreur "+pr.name,e); }
             }
             setProgress(null);
-          } else { allResults=await correctByLots(copies); }
-        } else { allResults=await correctByLots(copies); }
-      } else { allResults=await correctByLots(copies); }
+          } else { allResults=await correctByLots(copies,activeCorrRef); }
+        } else { allResults=await correctByLots(copies,activeCorrRef); }
+      } else { allResults=await correctByLots(copies,activeCorrRef); }
       setCorrections(parsedStudents.map(function(s){
         var found=allResults.find(function(r){return r.name&&r.name.toLowerCase().includes(s.name.split(" ")[0].toLowerCase());});
         return found?Object.assign({},s,found):Object.assign({},s,{skipped:true});
       }));
     }catch(e){setStatus("❌ "+e.message);console.error("correctFromPdf:",e);}
     finally{setBusy(false);setProgress(null);}
-    if(!corrRef)await buildCorrRef();
   }
 
   /* ── Correction manuelle ── */
@@ -692,15 +669,14 @@ function Devoir({ sid, sname, onBack }) {
     try {
       var b64 = await readFile(file);
       var blocks = [];
-      if (upSubPdf) {
+      // Utilise le corrigé texte si disponible (économie tokens), sinon le PDF sujet
+      if (corrRef) {
+        blocks.push({ type:"text", text:"CORRIGÉ DE RÉFÉRENCE :\n" + corrRef });
+      } else if (upSubPdf) {
         blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
       }
       blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } });
-      blocks.push({ type:"text", text:
-        "Corrige cette copie en retard.\nSUJET" + (subjectMode==="upload" ? " (voir PDF joint)" : ":\n" + latex) +
-        "\nCORRIGÉ:\n" + (corrRef || "[utilise tes connaissances]") +
-        "\nJSON uniquement :\n[{\"name\":\"Prénom Nom\",\"pageStart\":1,\"pageEnd\":1,\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}]"
-      });
+      blocks.push({ type:"text", text:"Copie en retard. JSON uniquement." });
       var raw = await callClaude(apiKey, [{ role:"user", content:blocks }], corrPrompt);
       var arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
       if (arr.length > 0) {
@@ -723,44 +699,60 @@ function Devoir({ sid, sname, onBack }) {
     setCorrRefLoading(true);
     setStatus("Génération du corrigé en LaTeX…");
     try {
-      var sysPrompt = "Professeur de maths lycée. RÈGLES STRICTES :"
-        + " 1) Formules display : $$formule$$ (JAMAIS \\[ \\] ni \\begin{equation} seul)."
-        + " 2) Formules inline : $formule$."
-        + " 3) Tableaux : $$\\begin{array}{...}...\\end{array}$$."
-        + " 4) Structure : \\section*{titre} \\begin{enumerate} \\item."
-        + " Retourne UNIQUEMENT le contenu LaTeX du corrigé (sans \\documentclass).";
       var raw = await callClaude(apiKey,
         [{ role:"user", content:[
           { type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } },
           { type:"text", text:"Génère le corrigé complet et détaillé en LaTeX. Exercice par exercice, toutes les étapes, toutes les formules." }
         ]}],
-        sysPrompt
+        DEFAULT_CORR_SYS
       );
       setCorrRef(raw.trim());
-      corrImgRef.current = null;
     } catch(e) { console.warn("buildCorrRef:", e); }
     finally { setCorrRefLoading(false); setStatus(""); }
   }
 
 
-  /* ── Construire le HTML d'un mail élève ── */
-  function buildMailHtml(cor, corrImg) {
+  /* ── Appliquer les consignes de modification du corrigé ── */
+  async function applyEditInstr() {
+    var instr = (corrEditInstr || "").trim();
+    if (!instr || !corrRef || !apiKey) return;
+    setBusy(true); setCorrEditBusy(true);
+    setStatus("Modification du corrigé…");
+    try {
+      var raw = await callClaude(apiKey,
+        [{ role:"user", content:
+          "Voici le corrigé actuel en LaTeX :\n\n" + corrRef +
+          "\n\nModifie-le selon ces consignes : " + instr +
+          "\n\nRetourne le corrigé complet modifié en LaTeX."
+        }],
+        DEFAULT_CORR_SYS
+      );
+      setCorrRef(raw.trim());
+      setCorrEditInstr("");
+    } catch(e) { setStatus("❌ " + e.message); }
+    finally { setBusy(false); setCorrEditBusy(false); setStatus(""); }
+  }
+
+
+  function buildMailHtml(cor, corrRefLatex) {
     var prenom = cor.name.split(" ")[0];
     var nc = !isNaN(+cor.note) ? (+cor.note >= 10 ? "#16a34a" : "#dc2626") : "#111";
     var detRows = (cor.details || []).map(function(d) {
       return "<tr><td style=\"padding:5px 8px;color:#555;border-top:1px solid #e5e7eb\">" + d.exercice + "</td>"
         + "<td style=\"padding:5px 8px;font-weight:600;border-top:1px solid #e5e7eb;white-space:nowrap\">" + d.obtenu + "/" + d.sur + "</td>"
-        + "<td style=\"padding:5px 8px;color:#444;border-top:1px solid #e5e7eb\">" + d.remarque + "</td></tr>";
+        + "<td style=\"padding:5px 8px;color:#444;border-top:1px solid #e5e7eb\">" + (d.remarque||"") + "</td></tr>";
     }).join("");
+    var corrHtml = corrRefLatex ? latexToHtml(corrRefLatex) : "";
     return "<div style=\"font-family:Georgia,serif;max-width:640px;margin:0 auto;padding:24px;color:#111\">"
       + "<h1 style=\"font-size:15pt;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px\">Bonjour " + prenom + ",</h1>"
       + "<p style=\"font-size:13pt;margin-bottom:4px\">Voici ton résultat pour <strong>" + sname + "</strong>.</p>"
       + "<p style=\"font-size:26pt;font-weight:bold;color:" + nc + ";margin:12px 0\">" + cor.note + "<span style=\"font-size:14pt;color:#555\"> / 20</span></p>"
       + "<p style=\"color:#555;font-style:italic;margin-bottom:12px\">" + (cor.appreciation || "") + "</p>"
       + (detRows ? "<table style=\"width:100%;border-collapse:collapse;margin-bottom:16px;font-size:11pt\">" + detRows + "</table>" : "")
-      + (corrImg
-        ? "<p style=\"font-weight:600;font-size:11pt;color:#374151;margin-bottom:8px\">📝 Corrigé :</p>"
-          + "<img src=\"" + corrImg + "\" style=\"max-width:100%;border:1px solid #e5e7eb;border-radius:6px;display:block\" alt=\"Corrigé\"/>"
+      + (corrHtml
+        ? "<hr style=\"margin:20px 0;border:none;border-top:1px solid #e5e7eb\"/>"
+          + "<p style=\"font-weight:600;font-size:11pt;color:#374151;margin-bottom:12px\">📝 Corrigé du sujet :</p>"
+          + "<div style=\"background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px 20px;line-height:1.8;font-size:12pt\">" + corrHtml + "</div>"
         : "")
       + "<div style=\"background:#eff6ff;border-left:3px solid #3b82f6;padding:12px 16px;margin-top:16px;border-radius:4px;font-size:11pt;color:#1e40af\">"
       + "<strong>💡 Conseil :</strong> " + (cor.conseil || "") + "</div>"
@@ -768,8 +760,8 @@ function Devoir({ sid, sname, onBack }) {
   }
 
   /* ── Envoyer à un élève ── */
-  async function sendOne(cor, corrImg) {
-    await sendGmailHtml(cor.email, "Résultats – " + sname, buildMailHtml(cor, corrImg));
+  async function sendOne(cor) {
+    await sendGmailHtml(cor.email, "Résultats – " + sname, buildMailHtml(cor, corrRef));
   }
 
   /* ── Renvoi individuel ── */
@@ -778,8 +770,7 @@ function Devoir({ sid, sname, onBack }) {
     setResending(cor.id);
     try {
       await getGmailToken();
-      var img = await buildCorrImage().catch(function() { return null; });
-      await sendOne(cor, img);
+      await sendOne(cor);
     } catch(e) { alert("Erreur renvoi : " + e.message); }
     finally { setResending(null); }
   }
@@ -793,13 +784,10 @@ function Devoir({ sid, sname, onBack }) {
       setStatus("Connexion Gmail…");
       await getGmailToken();
 
-      setStatus("Génération de l'image corrigé (formules)…");
-      var corrImg = await buildCorrImage().catch(function() { return null; });
-
       var errors = [];
       for (var i = 0; i < toSend.length; i++) {
         setProgress({ current: i+1, total: toSend.length, label: toSend[i].name.split(" ")[0] });
-        try { await sendOne(toSend[i], corrImg); }
+        try { await sendOne(toSend[i]); }
         catch(e) { errors.push(toSend[i].name); console.error(e); }
       }
       setProgress(null);
@@ -988,7 +976,7 @@ function Devoir({ sid, sname, onBack }) {
             </Card>
           )}
 
-          {/* Corrigé éditable */}
+          {/* Corrigé rendu KaTeX + zone de consignes */}
           {corrections.length === 0 && (
             <Card>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -999,9 +987,21 @@ function Devoir({ sid, sname, onBack }) {
               {corrRefLoading && <p style={{fontSize:12,color:"#6b7280",textAlign:"center"}}>Génération du corrigé depuis le sujet PDF…</p>}
               {!corrRefLoading&&corrRef && (
                 <div>
-                  <p style={{fontSize:11,color:"#6b7280",marginBottom:6}}>Modifiez si besoin avant de corriger :</p>
-                  <textarea value={corrRef} onChange={function(e){setCorrRef(e.target.value);corrImgRef.current=null;}}
-                    style={{width:"100%",minHeight:180,fontFamily:"monospace",fontSize:11,lineHeight:1.5}}/>
+                  {/* Rendu KaTeX du corrigé */}
+                  <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"20px 24px",lineHeight:1.8,fontSize:13,maxHeight:400,overflowY:"auto",marginBottom:12}}
+                    dangerouslySetInnerHTML={{__html:latexToHtml(corrRef)}}/>
+                  {/* Zone de consignes pour modifier le corrigé */}
+                  <div style={{background:"#f0f9ff",border:"0.5px solid #bae6fd",borderRadius:8,padding:"12px 14px"}}>
+                    <div style={{fontSize:12,fontWeight:500,color:"#0369a1",marginBottom:6}}>✏️ Modifier le corrigé</div>
+                    <p style={{fontSize:11,color:"#0369a1",marginBottom:8}}>Décrivez vos modifications et cliquez sur "Régénérer" :</p>
+                    <textarea value={corrEditInstr||""} onChange={function(e){setCorrEditInstr(e.target.value);}}
+                      placeholder={"Ex : À l'exercice 2, la réponse est 42 et non 24. Ajoute aussi un encadré pour la formule du discriminant."}
+                      style={{width:"100%",minHeight:70,fontSize:12,marginBottom:8}}/>
+                    <button disabled={busy||!apiKey||!(corrEditInstr||"").trim()} onClick={applyEditInstr}
+                      style={{fontSize:12,padding:"5px 14px",background:"#0369a1",border:"none"}}>
+                      {busy&&corrEditBusy?"⏳ Régénération…":"🔄 Régénérer le corrigé"}
+                    </button>
+                  </div>
                 </div>
               )}
               {!corrRefLoading&&!corrRef && <p style={{fontSize:12,color:"#9ca3af",fontStyle:"italic"}}>Le corrigé sera généré automatiquement une fois les copies chargées.</p>}
@@ -1052,24 +1052,7 @@ function Devoir({ sid, sname, onBack }) {
                   )}
                 </div>
               )}
-              <div style={{textAlign:"center",fontSize:12,color:"#9ca3af",margin:"10px 0 6px"}}>— ou saisir les réponses manuellement —</div>
-              {parsedStudents.map(function(s) {
-                return (
-                  <Card key={s.id} style={{marginBottom:8}}>
-                    <div style={{fontSize:14,fontWeight:500,marginBottom:8}}>{s.name}</div>
-                    <Field label="Réponses de l'élève">
-                      <textarea value={answers[s.id]||""} onChange={function(e){setAnswers(Object.assign({},answers,{[s.id]:e.target.value}));}}
-                        placeholder="Saisissez ou résumez les réponses…"
-                        style={{minHeight:80,fontFamily:"monospace",fontSize:12}}/>
-                    </Field>
-                  </Card>
-                );
-              })}
-              {Object.values(answers).some(function(v){return v && v.trim();}) && (
-                <button disabled={busy||!apiKey} onClick={correctAll} style={{width:"100%"}}>
-                  {busy ? status : "🤖 Corriger toutes les copies ↗"}
-                </button>
-              )}
+
             </Card>
           )}
 
@@ -1105,11 +1088,19 @@ function Devoir({ sid, sname, onBack }) {
                                   🔍 {d.transcription}
                                 </div>
                               )}
-                              <div style={{color:"#444"}}>{d.remarque}</div>
+                              <div style={{color:"#444",lineHeight:1.6}} dangerouslySetInnerHTML={{__html:latexToHtml(d.remarque||"")}}/>
                             </div>
                           );
                         })}
                         <p style={{fontSize:12,color:"#6b7280",fontStyle:"italic",margin:"8px 0 0"}}>💡 {c.conseil}</p>
+                        {/* Corrigé général en KaTeX */}
+                        {corrRef && (
+                          <div style={{marginTop:14,borderTop:"1px solid #e5e7eb",paddingTop:12}}>
+                            <div style={{fontSize:12,fontWeight:500,color:"#374151",marginBottom:8}}>📐 Corrigé du sujet</div>
+                            <div style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"16px 18px",lineHeight:1.8,fontSize:13,maxHeight:350,overflowY:"auto"}}
+                              dangerouslySetInnerHTML={{__html:latexToHtml(corrRef)}}/>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <p style={{fontSize:13,color:"#9ca3af",fontStyle:"italic"}}>Copie non trouvée dans le PDF</p>
@@ -1210,9 +1201,9 @@ function Devoir({ sid, sname, onBack }) {
           ) : (
             <div>
               <div style={{fontSize:11,color:"#6b7280",textAlign:"center",margin:"8px 0"}}>
-                ⏱ ~{Math.ceil(validCorrs.filter(function(c){return !!c.email;}).length*5/60)+1} min
-                &nbsp;·&nbsp; ~{((validCorrs.filter(function(c){return !!c.email;}).length*0.005)+0.03).toFixed(2)}€
-                &nbsp;·&nbsp; 0 appel Claude supplémentaire
+                ⏱ ~{Math.ceil(validCorrs.filter(function(c){return !!c.email;}).length*3/60)+1} min
+                &nbsp;·&nbsp; ~{(validCorrs.filter(function(c){return !!c.email;}).length*0.003).toFixed(2)}€ (mails uniquement)
+                &nbsp;·&nbsp; 0 appel Claude
               </div>
               {busy && progress && (
                 <div style={{marginBottom:12}}>
