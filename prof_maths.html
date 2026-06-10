@@ -148,6 +148,46 @@ async function callClaude(key, messages, system) {
 }
 
 /* ══ LaTeX → HTML (KaTeX) ═════════════════════════════════════════ */
+/* ══ Réparation JSON LaTeX ════════════════════════════════════════
+   Claude écrit parfois du LaTeX brut dans les valeurs JSON :
+     "remarque":"soit $\frac{a}{b}$"  ← \f, \s, \a… invalides en JSON
+   Cette fonction double tous les backslashes sauf \" \\ \n \uXXXX.
+   \n est préservé pour les sauts de ligne intentionnels.           */
+function fixJsonBackslashes(raw) {
+  var out = [], inStr = false, i = 0;
+  while (i < raw.length) {
+    var c = raw[i];
+    if (!inStr) {
+      out.push(c);
+      if (c === '"') inStr = true;
+      i++;
+    } else if (c === '\\') {
+      var n = raw[i + 1] || '';
+      if (n === '"' || n === '\\') {
+        out.push(c, n); i += 2;                                  // \" et \\ — garder
+      } else if (n === 'n') {
+        out.push(c, n); i += 2;                                  // \n newline — garder
+      } else if (n === 'u' && /[0-9a-fA-F]{4}/.test(raw.slice(i+2, i+6))) {
+        out.push(c, n, raw[i+2], raw[i+3], raw[i+4], raw[i+5]); i += 6; // \uXXXX — garder
+      } else {
+        out.push('\\', '\\'); i++;  // tout le reste (\frac \sum \theta …) — doubler
+      }
+    } else {
+      if (c === '"') inStr = false;
+      out.push(c); i++;
+    }
+  }
+  return out.join('');
+}
+function safeJsonParse(raw) {
+  var s = raw.replace(/```json|```/g, '').trim();
+  try { return JSON.parse(s); } catch(e) {
+    try { return JSON.parse(fixJsonBackslashes(s)); } catch(e2) {
+      throw new Error('JSON invalide : ' + e.message);
+    }
+  }
+}
+
 function latexToHtml(src) {
   if (!window.katex || !src) return "<pre style=\"white-space:pre-wrap\">" + (src || "") + "</pre>";
   function rk(m, disp) {
@@ -182,8 +222,8 @@ function latexToHtml(src) {
     .replace(/\\textbf\{([^}]+)\}/g, "<strong>$1</strong>")
     .replace(/\\textit\{([^}]+)\}/g, "<em>$1</em>")
     .replace(/\{\\Large\\textbf\{([^}]+)\}\}/g, "<h1 style=\"font-size:16pt;text-align:center;margin:12px 0\">$1</h1>")
-    .replace(/\\section\*?\{([^}]+)\}/g, "<h2 style=\"font-size:13pt;margin:16px 0 8px\">$1</h2>")
-    .replace(/\\subsection\*?\{([^}]+)\}/g, "<h3 style=\"font-size:12pt;margin:12px 0 6px\">$1</h3>")
+    .replace(/\\section\*?\{([^}]+)\}/g, "<h2 style=\"font-size:13pt;margin:16px 0 8px;font-weight:bold\">$1</h2>")
+    .replace(/\\subsection\*?\{([^}]+)\}/g, "<h3 style=\"font-size:12pt;margin:12px 0 6px;font-weight:bold\">$1</h3>")
     .replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, function(_, b) {
       return "<ol style=\"padding-left:24px;margin:8px 0\">" + b.replace(/\\item\s+/g, "<li>").replace(/<li>([^<]*)/g, "<li>$1</li>") + "</ol>";
     })
@@ -197,8 +237,9 @@ function latexToHtml(src) {
     .replace(/\\hline/g, "")
     .replace(/\\[a-zA-Z]+\{([^}]*)\}/g, "$1")
     .replace(/\\[a-zA-Z]+/g, "")
-    .replace(/\n{2,}/g, "</p><p style=\"margin:5px 0\">");
-  return "<p style=\"margin:5px 0\">" + h + "</p>";
+    .replace(/\n{2,}/g, "<br/><br/>")  // double saut = séparation visuelle
+    .replace(/\n/g, "<br/>");           // saut simple = retour à la ligne
+  return "<div style=\"margin:0\">" + h + "</div>";
 }
 
 /* ══ Prompt de correction adaptatif (manuscrit + tapé, pleine qualité) ══ */
@@ -210,7 +251,7 @@ LECTURE : Si copie manuscrite/ambiguë → champ "transcription" décrivant l'in
 
 NOTATION : valorise démarche (méthode correcte + erreur calcul = majorité des points) ; valorise débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
 
-RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Dans appreciation et conseil : français courant, pas de LaTeX. Dans remarque : utilise le LaTeX ($...$ inline, $$...$$ display) pour toutes les formules mathématiques.
+RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Dans appreciation et conseil : français courant, pas de LaTeX. Dans remarque : LaTeX ($...$ inline, $$...$$ display) pour les formules ; commence chaque phrase ou formule sur une nouvelle ligne avec \\n ; dans le JSON double tous les antislashs (\\\\frac{}{}, \\\\sum, \\\\theta, \\\\sin pas \\frac, \\sum).
 
 FORMAT : JSON valide uniquement, sans \`\`\`json.
 [{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
@@ -422,7 +463,7 @@ function Devoir({ sid, sname, onBack }) {
           { type: "text", text: "Extrais le nom complet et l'email de chaque élève depuis ces copies (qui peuvent être manuscrites ou tapées).\nSi l'écriture est manuscrite ou difficile à lire, fais de ton mieux pour déchiffrer.\nJSON uniquement, sans backticks :\n[{\"name\":\"Prénom Nom\",\"email\":\"...\"}]\nSi pas d'email visible, mets \"\"." }
         ]
       }], "Tu extrais des noms d'élèves. JSON uniquement.");
-      var arr = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      var arr = safeJsonParse(raw);
       setStudents(arr.map(function(s) { return s.email ? s.name + ", " + s.email : s.name; }).join("\n"));
     } catch(e) { console.warn("Extraction noms:", e); }
     setExtracting(false);
@@ -519,7 +560,7 @@ function Devoir({ sid, sname, onBack }) {
         "\n\nDis-moi à quelle page commence et finit chaque copie."+
         "\nJSON uniquement :\n[{\"name\":\"Prenom Nom\",\"pageStart\":1,\"pageEnd\":2}]"}
     ]}],"Analyse PDF. JSON uniquement, compact.");
-    return JSON.parse(raw.replace(/```json|```/g,"").trim());
+    return safeJsonParse(raw);
   }
 
   /* ── Phase 2 : découpage local (aucune requête) ── */
@@ -549,7 +590,7 @@ function Devoir({ sid, sname, onBack }) {
     blocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:studentB64}});
     blocks.push({type:"text",text:"Élève : "+name+". Corrige UNIQUEMENT cette copie. 1 objet JSON."});
     var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
-    var p=JSON.parse(raw.replace(/```json|```/g,"").trim());
+    var p=safeJsonParse(raw);
     return Array.isArray(p)?p[0]:p;
   }
 
@@ -573,7 +614,7 @@ function Devoir({ sid, sname, onBack }) {
           "\nIdentifie la copie et ses pages. JSON uniquement."
         });
         var raw=await callClaude(apiKey,[{role:"user",content:blocks}],corrPrompt);
-        results=results.concat(JSON.parse(raw.replace(/```json|```/g,"").trim()));
+        results=results.concat(safeJsonParse(raw));
       }
     }
     return results;
@@ -651,7 +692,7 @@ function Devoir({ sid, sname, onBack }) {
               "\nCOPIE DE " + s.name + " (prénom: " + s.name.split(" ")[0] + "):\n" + ans +
               "\nJSON uniquement :\n{\"note\":14,\"appreciation\":\"...\",\"details\":[{\"exercice\":\"Ex 1\",\"obtenu\":\"7\",\"sur\":\"10\",\"remarque\":\"...\"}],\"conseil\":\"...\"}"
           }], corrPrompt);
-          var parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
+          var parsed = safeJsonParse(raw);
           var obj = Array.isArray(parsed) ? parsed[0] : parsed;
           results.push(Object.assign({}, s, obj));
         } catch(e) { results.push(Object.assign({}, s, { note:"?", appreciation:"Erreur.", details:[], conseil:"" })); }
@@ -678,7 +719,7 @@ function Devoir({ sid, sname, onBack }) {
       blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } });
       blocks.push({ type:"text", text:"Copie en retard. JSON uniquement." });
       var raw = await callClaude(apiKey, [{ role:"user", content:blocks }], corrPrompt);
-      var arr = JSON.parse(raw.replace(/```json|```/g,"").trim());
+      var arr = safeJsonParse(raw);
       if (arr.length > 0) {
         var r = arr[0];
         var existing = parsedStudents.find(function(s) {
