@@ -108,6 +108,48 @@ async function sendGmailHtml(to, subj, htmlBody) {
   }
 }
 
+/* ══ Gmail — envoi avec pièce jointe PDF ═══════════════════════════ */
+async function sendGmailWithAttachment(to, subj, bodyHtml, pdfBase64, pdfFilename) {
+  var token = await getGmailToken();
+  var bnd = "bndry_" + Math.random().toString(36).slice(2, 10);
+  // HTML body encodé en base64 (gère les caractères UTF-8)
+  var bodyB64 = btoa(unescape(encodeURIComponent(bodyHtml)));
+  // PDF base64 découpé en lignes de 76 chars (RFC 2045)
+  var pdfLines = (pdfBase64.match(/.{1,76}/g) || []).join("\r\n");
+  // Construire le MIME multipart (tout en ASCII après encodage)
+  var mime = [
+    "From: " + GMAIL_SENDER,
+    "To: " + to,
+    "Subject: =?UTF-8?B?" + btoa(unescape(encodeURIComponent(subj))) + "?=",
+    "MIME-Version: 1.0",
+    "Content-Type: multipart/mixed; boundary=\"" + bnd + "\"",
+    "",
+    "--" + bnd,
+    "Content-Type: text/html; charset=utf-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    bodyB64,
+    "--" + bnd,
+    "Content-Type: application/pdf; name=\"" + pdfFilename + "\"",
+    "Content-Transfer-Encoding: base64",
+    "Content-Disposition: attachment; filename=\"" + pdfFilename + "\"",
+    "",
+    pdfLines,
+    "--" + bnd + "--"
+  ].join("\r\n");
+  // base64url du message MIME complet (entièrement ASCII à ce stade)
+  var raw = btoa(mime).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  var res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: raw })
+  });
+  if (!res.ok) {
+    var err = await res.json();
+    throw new Error(err.error ? err.error.message : "Erreur Gmail");
+  }
+}
+
 /* ══ jsPDF → base64 (chunked, sans stack overflow) ════════════════ */
 function pdfToBase64(pdf) {
   var ab = pdf.output("arraybuffer");
@@ -775,34 +817,125 @@ function Devoir({ sid, sname, onBack }) {
   }
 
 
-  function buildMailHtml(cor, corrRefLatex) {
+  /* ── Corps du mail — simple HTML sans KaTeX (rendu OK dans tous les clients) ── */
+  function buildSimpleBodyHtml(cor) {
     var prenom = cor.name.split(" ")[0];
     var nc = !isNaN(+cor.note) ? (+cor.note >= 10 ? "#16a34a" : "#dc2626") : "#111";
-    var detRows = (cor.details || []).map(function(d) {
-      return "<tr><td style=\"padding:5px 8px;color:#555;border-top:1px solid #e5e7eb\">" + d.exercice + "</td>"
-        + "<td style=\"padding:5px 8px;font-weight:600;border-top:1px solid #e5e7eb;white-space:nowrap\">" + d.obtenu + "/" + d.sur + "</td>"
-        + "<td style=\"padding:5px 8px;color:#444;border-top:1px solid #e5e7eb\">" + latexToHtml(d.remarque||"") + "</td></tr>";
-    }).join("");
-    var corrHtml = corrRefLatex ? latexToHtml(corrRefLatex) : "";
-    return "<div style=\"font-family:Georgia,serif;max-width:640px;margin:0 auto;padding:24px;color:#111\">"
-      + "<h1 style=\"font-size:15pt;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px\">Bonjour " + prenom + ",</h1>"
-      + "<p style=\"font-size:13pt;margin-bottom:4px\">Voici ton résultat pour <strong>" + sname + "</strong>.</p>"
-      + "<p style=\"font-size:26pt;font-weight:bold;color:" + nc + ";margin:12px 0\">" + cor.note + "<span style=\"font-size:14pt;color:#555\"> / 20</span></p>"
-      + "<p style=\"color:#555;font-style:italic;margin-bottom:12px\">" + (cor.appreciation || "") + "</p>"
-      + (detRows ? "<table style=\"width:100%;border-collapse:collapse;margin-bottom:16px;font-size:11pt\">" + detRows + "</table>" : "")
-      + (corrHtml
-        ? "<hr style=\"margin:20px 0;border:none;border-top:1px solid #e5e7eb\"/>"
-          + "<p style=\"font-weight:600;font-size:11pt;color:#374151;margin-bottom:12px\">📝 Corrigé du sujet :</p>"
-          + "<div style=\"background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:16px 20px;line-height:1.8;font-size:12pt\">" + corrHtml + "</div>"
-        : "")
-      + "<div style=\"background:#eff6ff;border-left:3px solid #3b82f6;padding:12px 16px;margin-top:16px;border-radius:4px;font-size:11pt;color:#1e40af\">"
-      + "<strong>💡 Conseil :</strong> " + (cor.conseil || "") + "</div>"
-      + "<p style=\"margin-top:20px;color:#555;font-size:11pt\">Cordialement,<br/>F. Nocca</p></div>";
+    return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/></head><body>"
+      + "<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#111\">"
+      + "<p style=\"font-size:16px;margin:0 0 14px\">Bonjour <strong>" + prenom + "</strong>,</p>"
+      + "<p style=\"margin:0 0 10px\">Voici ton résultat pour le devoir <strong>" + sname + "</strong>&nbsp;:</p>"
+      + "<p style=\"font-size:38px;font-weight:bold;color:" + nc + ";margin:14px 0\">"
+      + cor.note + "<span style=\"font-size:18px;color:#666\">&nbsp;/&nbsp;20</span></p>"
+      + "<p style=\"color:#555;font-style:italic;margin:0 0 16px\">" + (cor.appreciation || "") + "</p>"
+      + "<p style=\"margin:0 0 20px\">Ton corrigé personnalisé est joint à ce message.</p>"
+      + "<p style=\"color:#777;font-size:13px\">Cordialement,<br/>F.&nbsp;Nocca</p>"
+      + "</div></body></html>";
   }
 
-  /* ── Envoyer à un élève ── */
-  async function sendOne(cor) {
-    await sendGmailHtml(cor.email, "Résultats – " + sname, buildMailHtml(cor, corrRef));
+  /* ── Génération PDF élève (html2canvas → jsPDF) ── */
+  async function buildStudentPdf(cor, corrRefLatex, cache) {
+    if (!window.jspdf) throw new Error("jsPDF non chargé");
+    // html2canvas chargé au préalable par l'appelant
+
+    var nc = !isNaN(+cor.note) ? (+cor.note >= 10 ? "#16a34a" : "#dc2626") : "#111";
+
+    /* ---- Section personnelle ---- */
+    var detRows = (cor.details || []).map(function(d) {
+      return "<tr>"
+        + "<td style=\"padding:6px 8px;border-top:1px solid #e5e7eb;color:#555;vertical-align:top;font-size:10.5pt\">" + d.exercice + "</td>"
+        + "<td style=\"padding:6px 8px;border-top:1px solid #e5e7eb;font-weight:600;white-space:nowrap;vertical-align:top;font-size:10.5pt\">" + d.obtenu + "/" + d.sur + "</td>"
+        + "<td style=\"padding:6px 8px;border-top:1px solid #e5e7eb;color:#333;vertical-align:top;font-size:10pt\">" + latexToHtml(d.remarque || "") + "</td>"
+        + "</tr>";
+    }).join("");
+
+    var personalHtml = "<div style=\"font-family:Georgia,serif;color:#111;line-height:1.7;font-size:12pt\">"
+      + "<h1 style=\"font-size:15pt;border-bottom:2px solid #333;padding-bottom:8px;margin:0 0 14px\">" + sname + " — Résultats</h1>"
+      + "<h2 style=\"font-size:13pt;margin:0 0 6px;font-weight:bold\">" + cor.name + "</h2>"
+      + "<p style=\"font-size:30pt;font-weight:bold;color:" + nc + ";margin:8px 0 4px\">" + cor.note + "<span style=\"font-size:14pt;color:#666\"> /20</span></p>"
+      + "<p style=\"color:#555;font-style:italic;margin:0 0 12px\">" + (cor.appreciation || "") + "</p>"
+      + (detRows ? "<table style=\"width:100%;border-collapse:collapse;margin-bottom:12px\">" + detRows + "</table>" : "")
+      + "<div style=\"background:#eff6ff;border-left:3px solid #3b82f6;padding:9px 13px;border-radius:3px;color:#1e40af;font-size:10pt\">"
+      + "<strong>Conseil :</strong> " + (cor.conseil || "") + "</div>"
+      + "</div>";
+
+    async function renderDiv(html, extraCss) {
+      var div = document.createElement("div");
+      div.style.cssText = "position:fixed;left:-9999px;top:0;width:680px;background:#fff;" + (extraCss || "padding:28px 36px;");
+      div.innerHTML = html;
+      document.body.appendChild(div);
+      await document.fonts.ready;
+      await new Promise(function(r) { setTimeout(r, 700); });
+      var cv = await window.html2canvas(div, { scale: 1.5, useCORS: true, backgroundColor: "#ffffff", logging: false });
+      document.body.removeChild(div);
+      return cv;
+    }
+
+    var canvas1 = await renderDiv(personalHtml);
+
+    /* ---- Section corrigé (mise en cache pour le lot) ---- */
+    var canvas2 = null;
+    if (corrRefLatex) {
+      if (cache && cache.corrCanvas) {
+        canvas2 = cache.corrCanvas;
+      } else {
+        var corrHtml = "<div style=\"font-family:Georgia,serif;font-size:11.5pt;line-height:1.75;color:#111\">"
+          + "<hr style=\"border:none;border-top:2px solid #333;margin:0 0 14px\"/>"
+          + "<h2 style=\"font-size:14pt;margin:0 0 14px;font-weight:bold\">Corrigé du sujet</h2>"
+          + latexToHtml(corrRefLatex)
+          + "</div>";
+        // Attente plus longue pour le corrRef (potentiellement long)
+        var div2 = document.createElement("div");
+        div2.style.cssText = "position:fixed;left:-9999px;top:0;width:680px;background:#fff;padding:18px 36px 32px;";
+        div2.innerHTML = corrHtml;
+        document.body.appendChild(div2);
+        await document.fonts.ready;
+        await new Promise(function(r) { setTimeout(r, 1200); });
+        canvas2 = await window.html2canvas(div2, { scale: 1.5, useCORS: true, backgroundColor: "#ffffff", logging: false });
+        document.body.removeChild(div2);
+        if (cache) cache.corrCanvas = canvas2; // réutilisé pour tous les élèves
+      }
+    }
+
+    /* ---- Assemblage jsPDF ---- */
+    var jsPDF = window.jspdf.jsPDF;
+    var pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    var W = pdf.internal.pageSize.getWidth();   // 210 mm
+    var H = pdf.internal.pageSize.getHeight();  // 297 mm
+    var mg = 12, iw = W - mg * 2, ih = H - mg * 2;
+    var firstPage = true;
+
+    function addCanvasToPdf(cv) {
+      var totalMm = (cv.height / cv.width) * iw;
+      var pages = Math.ceil(totalMm / ih);
+      for (var p = 0; p < pages; p++) {
+        if (!firstPage) pdf.addPage();
+        firstPage = false;
+        var y0 = Math.round((p * ih / totalMm) * cv.height);
+        var y1 = Math.min(Math.round(((p + 1) * ih / totalMm) * cv.height), cv.height);
+        var sc = document.createElement("canvas");
+        sc.width = cv.width; sc.height = y1 - y0;
+        sc.getContext("2d").drawImage(cv, 0, y0, cv.width, sc.height, 0, 0, cv.width, sc.height);
+        var sliceMm = (sc.height / cv.height) * totalMm;
+        pdf.addImage(sc.toDataURL("image/jpeg", 0.80), "JPEG", mg, mg, iw, sliceMm);
+      }
+    }
+
+    addCanvasToPdf(canvas1);
+    if (canvas2) addCanvasToPdf(canvas2);
+
+    return pdfToBase64(pdf);
+  }
+
+  /* ── Envoyer à un élève (PDF en pièce jointe) ── */
+  async function sendOne(cor, corrCache) {
+    var fname = "Corrige_"
+      + cor.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]/g, "_")
+      + ".pdf";
+    setStatus("⏳ PDF " + cor.name.split(" ")[0] + "…");
+    var pdfB64 = await buildStudentPdf(cor, corrRef, corrCache || {});
+    setStatus("📧 Envoi à " + cor.name.split(" ")[0] + "…");
+    await sendGmailWithAttachment(cor.email, "Résultats – " + sname, buildSimpleBodyHtml(cor), pdfB64, fname);
   }
 
   /* ── Renvoi individuel ── */
@@ -811,9 +944,10 @@ function Devoir({ sid, sname, onBack }) {
     setResending(cor.id);
     try {
       await getGmailToken();
-      await sendOne(cor);
+      await loadH2C();
+      await sendOne(cor, {}); // cache vide pour un renvoi isolé
     } catch(e) { alert("Erreur renvoi : " + e.message); }
-    finally { setResending(null); }
+    finally { setResending(null); setStatus(""); }
   }
 
   /* ── Envoyer tous les résultats ── */
@@ -824,11 +958,16 @@ function Devoir({ sid, sname, onBack }) {
     try {
       setStatus("Connexion Gmail…");
       await getGmailToken();
+      setStatus("Chargement rendu PDF…");
+      await loadH2C();
+
+      // Cache partagé : le corrigé est rendu une seule fois pour tout le lot
+      var corrCache = {};
 
       var errors = [];
       for (var i = 0; i < toSend.length; i++) {
         setProgress({ current: i+1, total: toSend.length, label: toSend[i].name.split(" ")[0] });
-        try { await sendOne(toSend[i]); }
+        try { await sendOne(toSend[i], corrCache); }
         catch(e) { errors.push(toSend[i].name); console.error(e); }
       }
       setProgress(null);
@@ -1242,9 +1381,8 @@ function Devoir({ sid, sname, onBack }) {
           ) : (
             <div>
               <div style={{fontSize:11,color:"#6b7280",textAlign:"center",margin:"8px 0"}}>
-                ⏱ ~{Math.ceil(validCorrs.filter(function(c){return !!c.email;}).length*3/60)+1} min
-                &nbsp;·&nbsp; ~{(validCorrs.filter(function(c){return !!c.email;}).length*0.003).toFixed(2)}€ (mails uniquement)
-                &nbsp;·&nbsp; 0 appel Claude
+                ⏱ ~{Math.ceil(validCorrs.filter(function(c){return !!c.email;}).length*5/60)+1} min
+                &nbsp;·&nbsp; PDF + mail par élève &nbsp;·&nbsp; 0 appel Claude
               </div>
               {busy && progress && (
                 <div style={{marginBottom:12}}>
