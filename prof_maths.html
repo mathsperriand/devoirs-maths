@@ -299,7 +299,9 @@ LECTURE MANUSCRITE : Analyse chaque page comme un document physique. Confusions 
 
 NOTATION : valorise démarche (méthode correcte + erreur calcul = majorité des points) ; valorise débuts de recherche ; jamais 0/20 ; indulgent sur rédaction, exigeant sur logique.
 
-RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Dans appreciation et conseil : français courant, pas de LaTeX. Dans remarque : LaTeX ($...$ inline, $$...$$ display) pour les formules ; commence chaque phrase ou formule sur une nouvelle ligne avec \\n ; dans le JSON double tous les antislashs (\\\\frac{}{}, \\\\sum, \\\\theta, \\\\sin pas \\frac, \\sum).
+CLÉMENCE : Ne jamais pénaliser deux fois la même erreur. Si la question N est fausse uniquement à cause d'une erreur commise à la question N-1, mais que la méthode à la question N est correcte, accorder tous les points de méthode de la question N. En cas de doute sur la sévérité d'une pénalité, toujours choisir l'option la plus favorable à l'élève.
+
+RÉDACTION : tutoie l'élève (prénom seul) ; sandwich (positif → critique → encouragement) ; conseil concret. Dans appreciation et conseil : français courant. Dans remarque : LaTeX ($...$ inline, $$...$$ display) pour les formules ; commence chaque phrase ou formule sur une nouvelle ligne avec \\n ; dans le JSON double tous les antislashs (\\\\frac{}{}, \\\\sum, \\\\theta, \\\\sin pas \\frac, \\sum).
 
 FORMAT : JSON valide uniquement, sans \`\`\`json.
 [{"name":"Prénom Nom","note":14,"appreciation":"...","details":[{"exercice":"Exercice 1","transcription":null,"obtenu":"3.5","sur":"5","remarque":"..."}],"conseil":"..."}]`;
@@ -440,6 +442,8 @@ function Devoir({ sid, sname, onBack }) {
   function setLatex(v) { setLatexR(v); ps("latex",v); }
   var [corrRef,     setCorrRefR]     = useState(function() { return ld("corrRef",""); });
   function setCorrRef(v) { setCorrRefR(v); ps("corrRef",v); }
+  var [corrSummary, setCorrSummaryR] = useState(function() { return ld("corrSummary",""); });
+  function setCorrSummary(v) { setCorrSummaryR(v); ps("corrSummary",v); }
   var [upSubName,   setUpSubNameR]   = useState(function() { return ld("upSubName",""); });
   function setUpSubName(v) { setUpSubNameR(v); ps("upSubName",v); }
   var [upSubPdf,    setUpSubPdf]     = useState(null); // binaire non persisté
@@ -689,8 +693,19 @@ function Devoir({ sid, sname, onBack }) {
           );
           activeCorrRef = sysR.trim();
           setCorrRef(activeCorrRef);
+          setCorrSummary(""); // forcer la régénération du résumé
         }catch(e){ console.warn("Corrigé ref échoué, on continue sans:",e); }
       }
+
+      // Étape 0b : condenser le barème (économie ~1200 tokens par copie)
+      var activeSummary = corrSummary;
+      if(!activeSummary && activeCorrRef){
+        setStatus("Condensation du barème (économie tokens)…");
+        activeSummary = await buildCorrSummary(activeCorrRef);
+        setCorrSummary(activeSummary);
+      }
+      // Texte envoyé à Claude pour corriger : résumé condensé si disponible, sinon corrigé complet
+      var corrForCorrecting = activeSummary || activeCorrRef;
 
       var allResults=[];
       if(copies.length===1){
@@ -707,14 +722,14 @@ function Devoir({ sid, sname, onBack }) {
               setProgress({current:i+1,total:pageRanges.length,label:pr.name.split(" ")[0]});
               try{
                 var sp=await extractStudentPdf(PDFLib,copies[0].b64,pr.pageStart,pr.pageEnd);
-                var r=await correctOnePdf(sp,pr.name,activeCorrRef);
+                var r=await correctOnePdf(sp,pr.name,corrForCorrecting);
                 if(r)allResults.push(r);
               }catch(e){ console.warn("Erreur "+pr.name,e); }
             }
             setProgress(null);
-          } else { allResults=await correctByLots(copies,activeCorrRef); }
-        } else { allResults=await correctByLots(copies,activeCorrRef); }
-      } else { allResults=await correctByLots(copies,activeCorrRef); }
+          } else { allResults=await correctByLots(copies,corrForCorrecting); }
+        } else { allResults=await correctByLots(copies,corrForCorrecting); }
+      } else { allResults=await correctByLots(copies,corrForCorrecting); }
       setCorrections(parsedStudents.map(function(s){
         var found=allResults.find(function(r){return r.name&&r.name.toLowerCase().includes(s.name.split(" ")[0].toLowerCase());});
         return found?Object.assign({},s,found):Object.assign({},s,{skipped:true});
@@ -760,9 +775,9 @@ function Devoir({ sid, sname, onBack }) {
     try {
       var b64 = await readFile(file);
       var blocks = [];
-      // Utilise le corrigé texte si disponible (économie tokens), sinon le PDF sujet
-      if (corrRef) {
-        blocks.push({ type:"text", text:"CORRIGÉ DE RÉFÉRENCE :\n" + corrRef });
+      // Utilise le résumé condensé si disponible (économie tokens), sinon le corrigé complet, sinon le PDF sujet
+      if (corrSummary || corrRef) {
+        blocks.push({ type:"text", text:"BARÈME DE RÉFÉRENCE :\n" + (corrSummary || corrRef) });
       } else if (upSubPdf) {
         blocks.push({ type:"document", source:{ type:"base64", media_type:"application/pdf", data:upSubPdf } });
       }
@@ -798,8 +813,30 @@ function Devoir({ sid, sname, onBack }) {
         DEFAULT_CORR_SYS
       );
       setCorrRef(raw.trim());
+      setCorrSummary(""); // le résumé devra être régénéré
     } catch(e) { console.warn("buildCorrRef:", e); }
     finally { setCorrRefLoading(false); setStatus(""); }
+  }
+
+  /* ── Condensé du barème (version courte pour les appels de correction) ── */
+  async function buildCorrSummary(corrRefText) {
+    if (!corrRefText || !apiKey) return "";
+    try {
+      var raw = await callClaude(apiKey,
+        [{ role:"user", content:
+          "Voici le corrigé LaTeX d'un devoir :\n\n" + corrRefText +
+          "\n\nGénère un barème condensé en texte simple (pas de LaTeX, pas de markdown). " +
+          "Pour chaque exercice et question : numéro | réponse finale | points | critères en une phrase. " +
+          "Exemple : Ex1 Q1 (2pts) : f'(x) = (1-2x)e^(-x). Critères : dérivée correcte 1pt, simplification 1pt.\n" +
+          "Sois le plus bref possible. Une ligne par question. Pas d'introduction."
+        }],
+        "Tu génères un barème condensé. Texte brut, une ligne par question, le plus court possible."
+      );
+      return raw.trim();
+    } catch(e) {
+      console.warn("buildCorrSummary:", e);
+      return "";
+    }
   }
 
 
@@ -819,6 +856,7 @@ function Devoir({ sid, sname, onBack }) {
         DEFAULT_CORR_SYS
       );
       setCorrRef(raw.trim());
+      setCorrSummary(""); // corrRef modifié → résumé à régénérer
       setCorrEditInstr("");
     } catch(e) { setStatus("❌ " + e.message); }
     finally { setBusy(false); setCorrEditBusy(false); setStatus(""); }
@@ -863,8 +901,10 @@ function Devoir({ sid, sname, onBack }) {
       + "<p style=\"font-size:30pt;font-weight:bold;color:" + nc + ";margin:8px 0 4px\">" + cor.note + "<span style=\"font-size:14pt;color:#666\"> /20</span></p>"
       + "<div style=\"color:#555;font-style:italic;margin:0 0 12px\">" + latexToHtml(cor.appreciation || "") + "</div>"
       + (detRows ? "<table style=\"width:100%;border-collapse:collapse;margin-bottom:12px\">" + detRows + "</table>" : "")
-      + "<div style=\"background:#eff6ff;border-left:3px solid #3b82f6;padding:9px 13px;border-radius:3px;color:#1e40af;font-size:10pt\">"
-      + "<strong>Conseil :</strong> " + latexToHtml(cor.conseil || "") + "</div>"
+      + "<div style=\"background:#eff6ff;border-left:3px solid #3b82f6;border-radius:3px;overflow:hidden\">"
+      + "<div style=\"padding:6px 13px 0;font-weight:bold;color:#1e40af;font-size:10pt\">Conseil :</div>"
+      + "<div style=\"padding:2px 13px 10px;color:#1e40af;font-size:10pt\">" + latexToHtml(cor.conseil || "") + "</div>"
+      + "</div>"
       + "</div>";
 
     async function renderDiv(html, extraCss) {
